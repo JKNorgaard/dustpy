@@ -480,8 +480,8 @@ def jacobian(sim, x, dx=None, *args, **kwargs):
     )
 
     # Storing hydrodynamic and boundary Jacobians for ice evolution
-    sim.dust.J_hyd = J_hyd.copy()
-    sim.dust.J_boundary = (J_in + J_out).copy()
+    sim.dust._J_hyd = J_hyd.copy()
+    sim.dust._J_boundary = (J_in + J_out).copy()
 
     # Adding and returning all matrix components
     return J_in + J_out + J_hyd + J_coag

@@ -274,8 +274,8 @@ def evolve_implicit(sim, field):
     dt = sim.t.prevstepsize
 
     # Retrieve hydrodynamics and boundary jacobians from dust routine
-    J_hyd = sim.dust.J_hyd 
-    J_boundary = sim.dust.J_boundary
+    J_hyd = sim.dust._J_hyd 
+    J_boundary = sim.dust._J_boundary
     #bf = time.perf_counter()
     # Build coagulation jacobian for ice
     J_coag = build_J_coag(sim)
