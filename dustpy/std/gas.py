@@ -236,7 +236,7 @@ def jacobian(sim, x, *args, **kwargs):
         gen,
         shape=(Nr, Nr)
     )
-
+    #sim.gas._jac = J.copy()
     return J
 
 
@@ -578,6 +578,10 @@ def _f_impl_1_direct(x0, Y0, dx, *args, **kwargs):
         jac.indices,
         jac.indptr
     )
+
+    Y0._owner.gas._jac = jac.copy()
+
+     # Solving linear system
 
     A_LU = sp.linalg.splu(jac,
                           permc_spec="MMD_AT_PLUS_A",

@@ -401,7 +401,7 @@ subroutine coagulation_parameters(cratRatio, fExcav, fragSlope, m, cstick, cstic
     end do
   end do
 
-  ! copodmod(:, j, i) has at most four non-zero elements for any combination of (j, i).
+  ! cpodmod(:, j, i) has at most four non-zero elements for any combination of (j, i).
   ! We only store the non-zero elemtens.
   do i=1, Nm
     do j=1, i
@@ -680,7 +680,6 @@ subroutine h_dubrulle1995(Hp, St, delta, h, Nr, Nm)
 
 end subroutine h_dubrulle1995
 
-
 subroutine jacobian_coagulation_generator(A, cStick, eps, iLF, iRM, iStick, m, phi, Rf, Rs, Sigma, SigmaFloor, &
   & dat, row, col, Nr, Nm)
   ! Subroutine calculates the coagulation Jacobian at every radial grid cell except for the boundaries.
@@ -791,7 +790,6 @@ subroutine jacobian_coagulation_generator(A, cStick, eps, iLF, iRM, iStick, m, p
             if(k .EQ. 0) cycle
             jac(ir, k, i) = jac(ir, k, i) + D(k, i) * cStick(l, j, i) * rates
           end do
-
         end if
 
         ! FRAGMENTATION
@@ -804,7 +802,7 @@ subroutine jacobian_coagulation_generator(A, cStick, eps, iLF, iRM, iStick, m, p
 
           ! Fragments distribution
           jac(ir, :, i) = jac(ir, :, i) + A(j, i) * phi(ilf(j, i)+1, :) / m(i) * ratef
-
+          
           ! Negative terms and remnant masses
           ! Erosion
           if(j .LE. i-p-1) then
@@ -830,7 +828,7 @@ subroutine jacobian_coagulation_generator(A, cStick, eps, iLF, iRM, iStick, m, p
           end if
 
         end if
-
+        
       end do
     end do
   end do
@@ -871,7 +869,7 @@ subroutine jacobian_hydrodynamic_generator(area, D, r, ri, SigmaGas, v, A, B, C,
   ! -------
   ! A(Nr) : sub-diagonal, A(1) not used
   ! B(Nr) : diagonal
-  ! C(Nr) : super-diagoanl, C(Nr) not used
+  ! C(Nr) : super-diagonal, C(Nr) not used
 
   use constants, only: twopi
   use interpolation, only: interp1d
@@ -996,7 +994,7 @@ subroutine kernel(a, H, Sigma, SigmaFloor, vrel, K, Nr, Nm)
   do ir=2, Nr-1
     do i=1, Nm
       if(Sigma(ir, i) .LT. SigmaFloor(ir, i)) cycle
-      do j=1, i
+      do j=1, Nm
         if(Sigma(ir, j) .LT. SigmaFloor(ir, j)) cycle
         K(ir, j, i) = (1.d0 - 0.5d0*kdelta(j, i)) * pi * (a(ir, j) + a(ir, i))**2 * vrel(ir, j, i) &
           & / sqrt( 2.d0 * pi * ( H(ir, j)**2 + H(ir, i)**2 ) )

@@ -1,6 +1,5 @@
 '''Module containing standard functions for the dust.'''
 
-
 import dustpy.constants as c
 from dustpy.std import dust_f
 
@@ -48,6 +47,14 @@ def prepare(sim):
     sim.dust.S.ext[-1] = 0.
     # Storing current surface density
     sim.dust._SigmaOld[...] = sim.dust.Sigma[...]
+    
+    #Store old surface density for ice evolution
+    sim.dust._sigmaOld = np.copy(sim.dust.Sigma)
+
+    #Save kernel, sticking and fragmentation probabilities for ice evolution
+    sim.dust.kernel_old = sim.dust.kernel.copy()
+    sim.dust.p.stick_old = sim.dust.p.stick.copy()
+    sim.dust.p.frag_old = sim.dust.p.frag.copy()
 
 
 def finalize_explicit(sim):
@@ -75,6 +82,7 @@ def finalize_implicit(sim):
     sim.dust.S.hyd.update()
     sim.dust.S.coag.update()
     set_implicit_boundaries(sim)
+
 
 
 def set_implicit_boundaries(sim):
@@ -313,7 +321,7 @@ def jacobian(sim, x, dx=None, *args, **kwargs):
     m = sim.grid.m
     phi = sim.dust.coagulation.phi
     Rf = sim.dust.kernel * sim.dust.p.frag
-    Rs = sim.dust.kernel * sim.dust.p.stick
+    Rs = sim.dust.kernel * sim.dust.p.stick 
     SigD = sim.dust.Sigma
     SigDfloor = sim.dust.SigmaFloor
 
@@ -471,8 +479,12 @@ def jacobian(sim, x, dx=None, *args, **kwargs):
         shape=(Ntot, Ntot)
     )
 
+    # Storing hydrodynamic and boundary Jacobians for ice evolution
+    sim.dust.J_hyd = J_hyd.copy()
+    sim.dust.J_boundary = (J_in + J_out).copy()
+
     # Adding and returning all matrix components
-    return J_in + J_coag + J_hyd + J_out
+    return J_in + J_out + J_hyd + J_coag
 
 
 def kernel(sim):

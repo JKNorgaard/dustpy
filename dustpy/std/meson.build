@@ -4,7 +4,12 @@ python_sources = [
   'gas.py',
   'grid.py',
   'sim.py',
-  'star.py'
+  'star.py',
+  'ice.py',
+  'vapor.py',
+  'chemistry.py',
+  'volatiles.py',
+  'volatile_constants.py'
   ]
 
 py3.install_sources(python_sources, subdir: 'dustpy/std')
@@ -20,6 +25,13 @@ gas_fortran_sources = [
   '../constants/constants.f90',
   '../utils/interpolation.f90',
   'gas.f90'
+  ]
+
+ice_fortran_sources = [
+  '../constants/constants.f90',
+  '../utils/math.f90',
+  '../utils/interpolation.f90',
+  'ice.f90'
   ]
 
 dust_source = custom_target('dust_fmodule.c',
@@ -44,6 +56,20 @@ gas_source = custom_target('gas_fmodule.c',
 
 py3.extension_module('gas_f',
   gas_fortran_sources+gas_source,
+  incdir_f2py / 'fortranobject.c',
+  include_directories: inc_np,
+  dependencies: py_dep,
+  install: true,
+  subdir: 'dustpy/std')
+
+ice_source = custom_target('ice_fmodule.c',
+  input: ice_fortran_sources,
+  output: ['ice_fmodule.c', 'ice_f-f2pywrappers2.f90'],
+  command: [py3, '-m', 'numpy.f2py', '--lower', '-m', 'ice_f', '@INPUT@', '--build-dir', 'dustpy/std']
+  )
+
+py3.extension_module('ice_f',
+  ice_fortran_sources+ice_source,
   incdir_f2py / 'fortranobject.c',
   include_directories: inc_np,
   dependencies: py_dep,
