@@ -6,11 +6,15 @@ from astropy import constants as ac
 
 def vapor_pressure_H2O(T):
     """Saturation vapor pressure of H2O."""
-    return np.exp(28.9074 - 6143.7 / T) * 10.0
+    return np.exp(28.9074 - 6143.7 / T)
 
 def vapor_pressure_CO(T):
     """Saturation vapor pressure of CO."""
-    return np.exp(27.37 - 1030 / T) * 10.0
+    return np.exp(27.37 - 1030 / T)
+
+def vapor_pressure_CH4(T):
+    """Saturation vapor pressure of CH4."""
+    return np.exp(23.49 - 1110 / T)
 
 VOLATILE_PROPERTIES = {
     "H2O": {
@@ -25,4 +29,9 @@ VOLATILE_PROPERTIES = {
         "vapor_pressure": vapor_pressure_CO,
     },
 
+    "CH4": {
+        "radius": 3.8e-8,                         # cm
+        "mass": 16.043 * ac.u.cgs.value,            # g
+        "vapor_pressure": vapor_pressure_CH4,
+    },
 }
