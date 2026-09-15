@@ -84,166 +84,240 @@ def volatile_quantities(sim, volatile_name):
 
     return Sigma_ML, Sigma_eq_vap, v_therm
 
-def delta_ice_analytic(dt, Ci, C_sum, Ei, vapor):
+def _constant_radius_cell(dt, ice, vapor, equilibrium, collision, monolayer):
+    """Analytic phase exchange at fixed geometry, with depletion events.
+
+    Arrays have shape (species, bins), except vapor/equilibrium (species,).
+    Each species sees the same geometry and its own conserved vapor pool.
     """
-    Analytic change in ice surface density per bin over dt.
-
-    Shapes:
-      Ci, Ei, ice: (Nr, Nm)
-      C_sum:       (Nr, 1)
-      vapor:       (Nr,)
-    """
-    vapor_2d = vapor[:, None]  # (Nr,1)
-
-    x = C_sum * dt
-    one_minus_exp = 1.0 - np.exp(-x)
-
-    num = (Ci * vapor_2d - Ei)  # (Nr,Nm)
-
-    C_safe = np.where(C_sum > 0.0, C_sum, 1.0) 
-    return np.where(C_sum > 0.0, (num / C_safe) * one_minus_exp, num * dt)
-
-def sublimation_substepping(dt, Ci, Ei, ice, vapor, sublimation_mask, ML):
-
-    d_ice_subl = np.zeros_like(ice)
-
-    idx = np.flatnonzero(sublimation_mask)
-    if idx.size == 0:
-        return d_ice_subl
-
-    # Work only on sublimating radii
-    ice_s = ice[idx].copy()
-    ML_s  = ML[idx]
-    Ci_s  = Ci[idx]
-    Ei_s  = Ei[idx]
-    vap_s = vapor[idx].copy()
-
-    dt_used = 0.0
-    it = 0
-    max_iter = ice_s.shape[0] * ice_s.shape[1]
-
-    tmp = np.empty_like(ice_s, dtype=float)
-
-    while dt_used < dt:
-        it += 1
-        if it > max_iter:
-            break
-
-        active = (ice_s > ML_s)
-        if not np.any(active):
-            break
-
-        Ci_use = Ci_s * active
-        Ei_use = Ei_s * active
-        C_rest = np.sum(Ci_use, axis=-1, keepdims=True)  # (Ns,1)
-
-        # if nothing actually sublimates, stop
-        if not np.any(C_rest > 0.0):
-            break
-
-        denom = Ci_use * vap_s[:, None] - Ei_use
-
-        # ratio = ((ice-ML)*C_rest + denom) / denom
-        numer = (ice_s - ML_s) * C_rest + denom
-
-        ratio = np.full_like(denom, np.inf, dtype=float)
-        valid = (C_rest > 0.0) & active & (denom < 0.0)
-        np.divide(numer, denom, out=ratio, where=valid)
-
-        valid2 = valid & np.isfinite(ratio) & (ratio > 0.0) & (ratio < 1.0)
-        if np.any(valid2):
-            # dt_candidate = -log(ratio)/C_rest
-            np.copyto(tmp, np.inf)
-            tmp.fill(np.inf)
-
-            if np.any(valid2):
-                r_idx, c_idx = np.where(valid2)
-                tmp[r_idx, c_idx] = -np.log(ratio[r_idx, c_idx]) / C_rest[r_idx, 0]
-                dt_sub = tmp.min()
+    change = np.zeros_like(ice)
+    for x in range(len(vapor)):
+        deficit = float(vapor[x]-equilibrium[x])
+        if deficit == 0.0:
+            continue
+        condensing = deficit > 0.0
+        active = collision[x] > 0.0
+        if not condensing:
+            active &= ice[x] > monolayer[x]
+        remaining = float(dt)
+        for _ in range(ice.shape[1]+1):
+            rates = np.where(active, collision[x], 0.0)
+            total = rates.sum()
+            if total == 0.0 or remaining <= 0.0:
+                break
+            weights = rates/total
+            available = max(0.0, np.sign(deficit)*(deficit-change[x].sum()))
+            if available == 0.0:
+                break
+            event_time = np.inf
+            if not condensing:
+                capacity = np.maximum(ice[x]+change[x]-monolayer[x], 0.0)
+                required = np.divide(capacity, weights, out=np.full_like(weights, np.inf), where=active)
+                first = int(np.argmin(required))
+                fraction = required[first]/available
+                if fraction < 1.0:
+                    event_time = -np.log1p(-fraction)/total
+            step = min(remaining, event_time)
+            with np.errstate(over='ignore'):
+                transferred = available*(-np.expm1(-total*step))
+            delta = weights*transferred
+            if not condensing:
+                delta = -np.minimum(delta, capacity)
+            change[x] += delta
+            finished = step == remaining
+            remaining = max(0.0, remaining-step)
+            if finished:
+                # The full remaining interval has been integrated.
+                break
+            if event_time <= step:
+                active[first] = False
             else:
-                dt_sub = np.inf
-        else:
-            dt_sub = np.inf
-
-        dt_rem = dt - dt_used
-        dt_step = dt_rem if (not np.isfinite(dt_sub) or dt_sub >= dt_rem) else dt_sub
-
-        # Analytic update for this substep (only Ns radii)
-        dice_full = delta_ice_analytic(dt_step, Ci_use, C_rest, Ei_use, vap_s)
-
-        # Enforce monolayer floor only where sublimating
-        ice_prev = ice_s
-        ice_trial = ice_prev + dice_full
-        ice_new = np.maximum(ice_trial, ML_s)
-        dice_eff = ice_new - ice_prev
-
-        # Accumulate + update state
-        d_ice_subl[idx, :] += dice_eff
-        ice_s = ice_new
-        vap_s += -np.sum(dice_eff, axis=-1)
-
-        dt_used += dt_step
-        if dt_step >= dt_rem:
-            break
-
-    return d_ice_subl
+                break
+    return change
 
 
 def sublimation_condensation(sim, volatile_name):
+    """Original constant-radius chemistry interface (no radius adaptation)."""
+    species = getattr(sim.volatiles, volatile_name)
+    ml, equilibrium, speed = volatile_quantities(sim, volatile_name)
+    collision = np.pi*sim.dust.a**2*(sim.dust.rho/sim.grid.m)*speed[:, None]
+    change = np.zeros_like(species.Sigmaice)
+    for r in range(len(sim.grid.r)):
+        change[r] = _constant_radius_cell(
+            float(sim.t.prevstepsize), np.asarray(species.Sigmaice[r])[None, :],
+            np.array([species.Sigmavap[r]]), np.array([equilibrium[r]]),
+            collision[r][None, :], ml[r][None, :])[0]
+    return change, -change.sum(axis=-1)
+
+
+# Retain the explicit name for comparisons with adaptive chemistry.
+sublimation_condensation_constant_radius = sublimation_condensation
+
+
+def _adaptive_cell(dt, ice, vapor, equilibrium, dust, radius, collision,
+                   monolayer, molecular_radius, radius_tolerance=0.01,
+                   max_substeps=10000):
+    """Local analytic substeps; all species share each frozen geometry.
+
+    monolayer*(a+r_mol)**2 is the monolayer inventory. Particle numbers,
+    density and temperature stay fixed until the final, single remapping.
     """
-    Returns:
-      d_ice: (Nr, Nm)
-      d_vap: (Nr,)
+    change = np.zeros_like(ice)
+    remaining = float(dt)
+    # Bound gross rather than net mass exchange so simultaneous growth and
+    # shrinkage cannot hide a large intermediate excursion of the radius.
+    mass_tolerance = 1.0-(1.0-radius_tolerance)**3
+    for _ in range(max_substeps):
+        if remaining <= 0.0 or ice.size == 0:
+            return change
+        mass = dust+change.sum(axis=0)
+        if np.any(mass <= 0.0):
+            raise RuntimeError('Chemistry exhausted the grain mass.')
+        a = radius*np.cbrt(mass/dust)
+        rates = collision*(a/radius)[None, :]**2
+        ml = monolayer*(a[None, :]+molecular_radius[:, None])**2
+        current_ice = ice+change
+        current_vapor = vapor-change.sum(axis=1)
+        h = remaining
+        for _ in range(100):
+            trial = _constant_radius_cell(h, current_ice, current_vapor,
+                                          equilibrium, rates, ml)
+            gross = np.abs(trial).sum(axis=0)
+            if np.all(gross <= mass_tolerance*mass):
+                break
+            # Use the instantaneous net phase rates only after a full-step
+            # trial fails: rapid microscopic exchange near equilibrium need
+            # not force small steps when the total transfer is negligible.
+            flux = rates*(current_vapor-equilibrium)[:, None]
+            flux = np.where((flux < 0.0) & (current_ice <= ml), 0.0, flux)
+            # A nearly bare species can have an enormous instantaneous
+            # sublimation rate but almost no ice left to transfer. Its
+            # depletion is handled analytically; it must not dictate the
+            # timestep for a slower species with a substantial mantle.
+            significant = np.abs(trial) > mass_tolerance*mass/(4*len(vapor))
+            flux = np.where(significant, flux, 0.0)
+            gross_rate = np.abs(flux).sum(axis=0)
+            bound = np.divide(mass_tolerance*mass, gross_rate,
+                              out=np.full_like(mass, np.inf), where=gross_rate > 0)
+            h = min(0.5*h, 0.8*bound.min())
+            if h <= 0.0:
+                raise RuntimeError('Adaptive chemistry timestep underflow.')
+        else:
+            raise RuntimeError('Adaptive chemistry could not bound the radius change.')
+        change += trial
+        remaining = max(0.0, remaining-h)
+        if remaining == 0.0:
+            return change
+    raise RuntimeError('Adaptive chemistry exceeded max_substeps.')
+
+
+def sublimation_condensation_all(sim, radius_tolerance=None, max_substeps=10000):
+    """Return phase changes, shapes (Ns,Nr,Nm), (Ns,Nr).
+
+    Call after transport of ALL species and before any chemistry/remapping.
+    T, H_d, N, solid density and equilibrium vapor pressures remain fixed.
+    Geometry varies unless sim.volatiles.chemistry_variable_radius is
+    disabled. In variable-radius mode radius_tolerance bounds excursions within
+    each substep, defaulting to chemistry_radius_tolerance (0.01).
     """
-    # Save ice and vapor before chemistry
-    ice0 = np.array(getattr(sim.volatiles, volatile_name).Sigmaice, copy=True)
-    vap0 = np.array(getattr(sim.volatiles, volatile_name).Sigmavap, copy=True)
+    names = tuple(sim.volatiles.names)
+    ice = np.stack([np.asarray(getattr(sim.volatiles, n).Sigmaice) for n in names])
+    vapor = np.stack([np.asarray(getattr(sim.volatiles, n).Sigmavap) for n in names])
+    dt = float(sim.t.prevstepsize)
+    variable_radius = getattr(sim.volatiles, 'chemistry_variable_radius', True)
+    if radius_tolerance is None:
+        radius_tolerance = getattr(sim.volatiles, 'chemistry_radius_tolerance', 0.01)
+    if not np.isfinite(dt) or dt < 0:
+        raise ValueError('Chemistry timestep must be finite and nonnegative.')
+    if not np.isfinite(radius_tolerance) or not 0 < radius_tolerance < 1:
+        raise ValueError('radius_tolerance must lie strictly between zero and one.')
+    if not isinstance(max_substeps, (int, np.integer)) or max_substeps < 1:
+        raise ValueError('max_substeps must be a positive integer.')
+    change = np.zeros_like(ice)
+    if dt == 0:
+        return change, np.zeros_like(vapor)
+    if np.any(sim.dust.Sigma.chemdelta):
+        raise ValueError('Chemistry requires a fresh chemistry step.')
+    dust = np.asarray(sim.dust.Sigma)
+    radius = np.asarray(sim.dust.a)
+    mass = np.asarray(sim.grid.m)
+    number = dust / mass
+    n_midplane = np.asarray(sim.dust.rho) / mass
+    floor = np.asarray(sim.dust.SigmaFloor)
+    resolved = dust > floor
+    invalid = (dust < 0) | np.any(ice < 0, axis=0) | (
+        resolved & (ice.sum(axis=0) > dust*(1+1e-10)))
+    if np.any(invalid):
+        r, k = np.argwhere(invalid)[0]
+        raise ValueError(f'Inconsistent total ice at radial bin {r}, mass bin {k}: '
+                         f'ice={ice[:,r,k].sum():.17g}, dust={dust[r,k]:.17g}.')
+    quantities = [volatile_quantities(sim, n) for n in names]
+    equilibrium = np.stack([q[1] for q in quantities])
+    velocity = np.stack([q[2] for q in quantities])
+    rm = np.array([float(getattr(sim.volatiles, n).radius) for n in names])
+    mm = np.array([float(getattr(sim.volatiles, n).mass) for n in names])
+    mono = (4*mm/rm**2)[:, None, None] * number[None, :, :]
+    collision = np.pi*radius[None, :, :]**2*n_midplane[None, :, :]*velocity[:, :, None]
+    for r in range(dust.shape[0]):
+        use = resolved[r] & (dust[r] > 0)
+        if not np.any(use):
+            continue
+        try:
+            if variable_radius:
+                change[:, r, use] = _adaptive_cell(
+                    dt, ice[:, r, use], vapor[:, r], equilibrium[:, r],
+                    dust[r, use], radius[r, use], collision[:, r, use],
+                    mono[:, r, use], rm, radius_tolerance=radius_tolerance,
+                    max_substeps=max_substeps)
+            else:
+                monolayer = mono[:, r, use] * (radius[r, use][None, :] + rm[:, None])**2
+                change[:, r, use] = _constant_radius_cell(
+                    dt, ice[:, r, use], vapor[:, r], equilibrium[:, r],
+                    collision[:, r, use], monolayer)
+        except RuntimeError as error:
+            raise RuntimeError(f'Chemistry at radial bin {r}: {error}') from error
+    return change, -change.sum(axis=-1)
 
-    # Initialize bookkeeping arrays for chemistry contributions
-    d_ice = np.zeros_like(ice0)
-    d_vap = np.zeros_like(vap0)
 
-    # Stepsize of transport step
-    dt = sim.t.prevstepsize
+def monolayer_shrinkage(sim):
+    """Return ice to release once, before remapping (Nspecies, Nr, Nm).
 
-    # Calculate species-specific quantities for sublimation and condensation
-    Sigma_ML, Sigma_eq_vap, v_therm = volatile_quantities(sim, volatile_name)
+    Ordinary chemistry has already set dust.Sigma.chemdelta. Use that mass
+    change to estimate the new radius at fixed grain number and material
+    density. Only bins at/below the old monolayer are corrected; thick ice
+    mantles remain under ordinary chemistry. No underfilled layer is filled.
 
-    # Simulation parameters for chemistry rates
-    a = sim.dust.a
-    n_dust = sim.dust.rho / sim.grid.m 
+    This assumes fast sublimation: the proposed release must take <= 1% of
+    the previous timestep, using the vapor deficit AFTER the whole proposed
+    transfer. Saturated and slow bins are left unchanged. The extra radius
+    reduction from this release is deliberately not iterated, but its mass
+    loss must still be included in the subsequent remapping.
+    """
+    dust = np.asarray(sim.dust.Sigma)
+    ratio = 1.0 + np.divide(sim.dust.Sigma.chemdelta, dust, out=np.zeros_like(dust), where=dust > 0)
+    ratio[0] = 1.0  # The original remapper preserves the inner boundary.
+    if np.any(ratio <= 0):
+        raise ValueError("Chemistry must leave positive grain mass.")
 
-    # Chemistry rates
-    Ci = np.pi * a**2 * v_therm[:, None] * n_dust
-    Ei = Ci * Sigma_eq_vap[:, None]
+    radius = sim.dust.a * np.cbrt(ratio)
+    number_density = dust / (np.sqrt(2*np.pi) * sim.dust.H * sim.grid.m)
+    budget = 0.01 * max(float(sim.t.prevstepsize), 0.0)
 
-    # Clip numerically problematic quantities
-    Ci = np.clip(Ci, 0, None) 
-    Ei = np.clip(Ei, 0, None) 
+    released = []
+    for name in sim.volatiles.names:
+        volatile = getattr(sim.volatiles, name)
+        ml, equilibrium, thermal_speed = volatile_quantities(sim, name)
 
-    # Create regime masks
-    condensation = vap0 > Sigma_eq_vap
-    sublimation = ~condensation
+        # Grain number is unchanged; only the surface per grain changes.
+        ml_new = ml * ((radius + volatile.radius) / (sim.dust.a + volatile.radius))**2
+        candidate = np.where(volatile.Sigmaice <= ml*(1.0 + 1e-10), np.maximum(volatile.Sigmaice - ml_new, 0.0), 0.0)
+        candidate[0] = 0.0
 
-    # Condensation (analytic, all bins participate)
-    if np.any(condensation):
-        C_all = np.sum(Ci, axis=-1, keepdims=True) # Sum over mass bins
-        dice_all = delta_ice_analytic(dt, Ci, C_all, Ei, vap0) # Analytic change in ice
+        deficit = np.maximum(equilibrium - volatile.Sigmavap - candidate.sum(axis=-1), 0.0)
+        rate = (np.pi * radius**2 * thermal_speed[:, None] * number_density * deficit[:, None])
+        released.append(np.where((budget > 0) & (rate > 0) & (candidate <= budget*rate), candidate, 0.0))
+    return np.stack(released)
 
-        # Only save radii in condensation regime
-        d_ice[condensation, :] = dice_all[condensation, :] 
-
-    # Sublimation (substepping, restricted set)
-    if np.any(sublimation):
-        # Substep to only consider non-bare dust grains
-        d_ice_subl = sublimation_substepping(dt, Ci, Ei, ice0, vap0, sublimation, Sigma_ML)
-
-        # Only save radii in sublimation regime
-        d_ice[sublimation, :] = d_ice_subl[sublimation, :]
-
-    d_vap = -np.sum(d_ice, axis=-1)
-    
-    return d_ice, d_vap
 
 def remapper(sim):
     """

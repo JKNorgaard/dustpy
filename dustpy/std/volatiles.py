@@ -9,6 +9,25 @@ from dustpy.utils.boundary import Boundary
 from simframe.frame import Group
 from dustpy.std.volatile_constants import VOLATILE_PROPERTIES
 
+def chemistry_updater(sim):
+    """Exchange phases with variable radius unless explicitly disabled."""
+    delta_ice, delta_vapor = std.chemistry.sublimation_condensation_all(sim)
+    # Commit only after every cell has solved successfully.
+    for x, name in enumerate(sim.volatiles.names):
+        species = getattr(sim.volatiles, name)
+        species.Sigmaice += delta_ice[x]
+        species.Sigmavap += delta_vapor[x]
+        std.vapor.enforce_floor_value(species.Sigmavap)
+    sim.dust.Sigma.chemdelta += delta_ice.sum(axis=0)
+    sim.gas.Sigma += delta_vapor.sum(axis=0)
+
+
+def finalize_volatiles(sim):
+    """Transport all species, exchange phases together, then remap once."""
+    chemistry_updater(sim)
+    remap_updater(sim)
+
+
 def remap_updater(sim):
     """Function defines the updater function for remapping surface densities back onto the mass grid.
        This function is called at each time step to update the dust surface density based on the change in ice species surface densities.
@@ -20,7 +39,18 @@ def remap_updater(sim):
         volatiles : list of str
             List of volatile species in the simulation frame
         """
-    # Remap the dust and ice surface densities to account for chemistry
+    if getattr(sim.volatiles, 'chemistry_variable_radius', True):
+        # Correct monolayers once using the radius after ordinary chemistry.
+        # All species see the same geometry for this correction.
+        released = std.chemistry.monolayer_shrinkage(sim)
+        for i, volatile_name in enumerate(sim.volatiles.names):
+            volatile = getattr(sim.volatiles, volatile_name)
+            volatile.Sigmaice -= released[i]
+            volatile.Sigmavap += released[i].sum(axis=-1)
+        sim.dust.Sigma.chemdelta -= released.sum(axis=0)
+        sim.gas.Sigma += released.sum(axis=(0, 2))
+
+    # Remap once to account for the chemistry mass exchange.
     dust_new, ice_new = std.chemistry.remapper(sim)
 
     # Update the dust surface density and enforce floor value
@@ -144,32 +174,6 @@ def add_volatile(sim, volatile_name, initial_distribution):
     vapor_field.updater.updater = vapor_updater
 
 
-    ######################## CHEMISTRY UPDATER FOR VOLATILE ICE AND VAPOR ########################
-
-    # Define updater for chemistry between ice and vapor species
-    def chemistry_updater(sim):
-        """Apply sublimation and condensation between ice and vapor."""
-
-        delta_ice, delta_vapor = (std.chemistry.sublimation_condensation(sim,volatile_name,))
-
-        # Save total chemistry-induced change in dust mass
-        # for the later remapping step
-        sim.dust.Sigma.chemdelta += delta_ice
-
-        # Apply changes to this volatile species
-        volatile.Sigmaice += delta_ice
-        volatile.Sigmavap += delta_vapor
-
-        # Enforce vapor floor
-        std.vapor.enforce_floor_value(volatile.Sigmavap)
-
-        # Vapor contributes directly to gas surface density
-        sim.gas.Sigma += delta_vapor
-
-    # Chemistry updater is called after the transport updaters
-    vapor_field.updater.diastole = chemistry_updater
-
-
 
 def add_volatiles(sim, volatiles, initial_distributions=None):
     """Function adds volatile species to the simulation frame
@@ -189,6 +193,8 @@ def add_volatiles(sim, volatiles, initial_distributions=None):
     sim.addgroup("volatiles", description="Volatile species")
 
     sim.volatiles.names = tuple(volatiles)
+    sim.volatiles.chemistry_variable_radius = True
+    sim.volatiles.chemistry_radius_tolerance = 0.01
 
     # Constants and bookkeeping arrays for ice coagulation are initialized
     cstick_ice, cstick_ind_ice, Xi = ice_f.coagulation_parameters_ice(sim.grid.m, sim.ini.dust.erosionMassRatio, sim.grid.Nm)
@@ -212,4 +218,4 @@ def add_volatiles(sim, volatiles, initial_distributions=None):
 
     sim.updater = ['star', 'grid', 'gas', 'dust', 'volatiles']
     sim.volatiles.updater = volatiles
-    sim.volatiles.updater.diastole = remap_updater
+    sim.volatiles.updater.diastole = finalize_volatiles

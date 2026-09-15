@@ -76,8 +76,15 @@ def enforce_floor_value(field):
     field : Field, Parent field
     """
 
+    # An ice tracer cannot retain a resolved population after its carrier
+    # dust has been reset to the numerical floor. Otherwise those remnants
+    # accumulate independently and can exceed the grain mass when the bin
+    # becomes populated again. Apply the existing ice floor to the same
+    # absent populations; do not clip inventories in populated dust bins.
+    sim = field._owner
+    populated = sim.dust.Sigma > sim.dust.SigmaFloor
     field[...] = np.where(
-        field > field.SigmaFloor,
+        (field > field.SigmaFloor) & populated,
         field,
         0.1*field.SigmaFloor)
 
