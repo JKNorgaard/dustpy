@@ -11,13 +11,19 @@ from dustpy.std.volatile_constants import VOLATILE_PROPERTIES
 
 def chemistry_updater(sim):
     """Exchange phases with variable radius unless explicitly disabled."""
+
+    # Run the sublimation and condensation chemistry for all volatile species
     delta_ice, delta_vapor = std.chemistry.sublimation_condensation_all(sim)
-    # Commit only after every cell has solved successfully.
+
+    # Update the surface densities of each volatile species based on the changes in ice and vapor surface densities
     for x, name in enumerate(sim.volatiles.names):
         species = getattr(sim.volatiles, name)
         species.Sigmaice += delta_ice[x]
         species.Sigmavap += delta_vapor[x]
+        # Enforce floor values for the updated surface densities of ice and vapor
         std.vapor.enforce_floor_value(species.Sigmavap)
+
+    # Update the dust chemistry delta and gas surface density based on the total changes in ice and vapor
     sim.dust.Sigma.chemdelta += delta_ice.sum(axis=0)
     sim.gas.Sigma += delta_vapor.sum(axis=0)
 

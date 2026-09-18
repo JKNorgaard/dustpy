@@ -1,0 +1,174 @@
+\subsubsection{Sublimation and condensation}
+\label{subsec:sublimation_condensation}
+
+Following Eq.~(36) of \citet{stammlerRedistributionCOLocation2017}, the exchange between
+ice and vapor of species $X$ on grain population $k$ is written as
+\begin{equation}
+    \frac{\mathrm d\Sigma_{X^{\mathrm{ice}},k}}{\mathrm dt}
+    =\chi_{X,k}\pi a_k^2 n_{\mathrm{dust},k}v_{\mathrm{therm},X}
+    \left(\Sigma_{X^{\mathrm{vap}}}
+    -\Sigma_{X^{\mathrm{vap}}}^{\mathrm{eq}}\right),
+    \label{eq:simultaneous_phase_rate}
+\end{equation}
+where $\Sigma_{X^{\mathrm{vap}}}^{\mathrm{eq}}$ is the equilibrium
+vapor surface density and $\chi_{X,k}$ indicates whether the grain
+population participates in the exchange. All populations participate
+in condensation, whereas sublimation requires an ice inventory
+exceeding one molecular monolayer. The temperature, dust scale
+heights, grain numbers, and material density are held fixed during
+the chemistry step. Different radial cells exchange no material
+through chemistry and can therefore be integrated independently.
+
+The equilibrium vapor surface density of species $X$ is
+\begin{equation}
+    \Sigma_{X^{\mathrm{vap}}}^{\mathrm{eq}}
+    =
+    \sqrt{2\pi}H_g
+    \frac{m_X}{k_{\mathrm B}T}P_X^{\mathrm{eq}}(T),
+    \label{eq:sigma_vap_eq}
+\end{equation}
+where $P_X^{\mathrm{eq}}(T)$ is the equilibrium vapor pressure over ice
+and $m_X$ is the molecular mass. The mean molecular thermal velocity is
+\begin{equation}
+    v_{\mathrm{therm},X}
+    =\sqrt{\frac{8k_{\mathrm B}T}{\pi m_X}}.
+\end{equation}
+
+The midplane grain number density is
+$n_{\mathrm{dust},k}=N_k/(\sqrt{2\pi}H_{\mathrm d,k})$
+and remains fixed throughout chemistry.
+
+For a fixed grain radius and a fixed set of participating populations,
+we define
+\begin{equation}
+    C_{X,k}=\chi_{X,k}\pi a_k^2
+    n_{\mathrm{dust},k}v_{\mathrm{therm},X},
+    \qquad C_X=\sum_k C_{X,k}.
+\end{equation}
+Conservation of each volatile requires
+\begin{equation}
+    \frac{\mathrm d\Sigma_{X^{\mathrm{vap}}}}{\mathrm dt}
+    =-\sum_k\frac{\mathrm d\Sigma_{X^{\mathrm{ice}},k}}{\mathrm dt}
+    =-C_X\left(\Sigma_{X^{\mathrm{vap}}}
+    -\Sigma_{X^{\mathrm{vap}}}^{\mathrm{eq}}\right).
+\end{equation}
+Thus, over an interval $h$ beginning at $t_n$, the vapor evolves as
+\begin{equation}
+    \Sigma_{X^{\mathrm{vap}}}(t_n+h)
+    =\Sigma_{X^{\mathrm{vap}}}^{\mathrm{eq}}
+    +\Delta_{X,n}\exp(-C_Xh),
+    \label{eq:vapor_chem_solution}
+\end{equation}
+where $\Delta_{X,n}=\Sigma_{X^{\mathrm{vap}}}(t_n)
+-\Sigma_{X^{\mathrm{vap}}}^{\mathrm{eq}}$. The corresponding ice
+transfer is
+\begin{equation}
+    \delta\Sigma_{X^{\mathrm{ice}},k}
+    =\frac{C_{X,k}}{C_X}\Delta_{X,n}
+    \left[1-\exp(-C_Xh)\right],
+    \label{eq:analytic_ice_substep}
+\end{equation}
+with zero transfer when $C_X=0$. Numerically, the exponential
+difference is evaluated using \texttt{expm1} to avoid cancellation
+for short intervals. Vapor is updated from the summed ice transfer,
+so that phase exchange conserves the combined inventory of each
+species to floating-point accuracy.
+
+During sublimation, a population becomes inactive when its inventory
+reaches
+\begin{equation}
+    \Sigma_{X^{\mathrm{ice}},k}^{\mathrm{monolayer}}
+    =N_k\frac{4\pi(a_k+r_X)^2}{\sigma_X}m_X,
+    \label{eq:monolayer_surface_density}
+\end{equation}
+where $N_k=\Sigma_{\mathrm d,k,0}/m_{k,0}$ is the fixed grain surface number density, $r_X$ and $m_X$
+are the molecular radius and mass, and $\sigma_X$ is the area occupied
+by one molecule. Writing $w_{X,k}=C_{X,k}/C_X$ and
+$L_{X,k}=\Sigma_{X^{\mathrm{ice}},k}
+-\Sigma_{X^{\mathrm{ice}},k}^{\mathrm{monolayer}}$, the depletion
+time at fixed geometry is
+\begin{equation}
+    h_{X,k}^{\mathrm{dep}}
+    =-\frac{1}{C_X}\ln\left(1-
+    \frac{L_{X,k}}{w_{X,k}|\Delta_{X,n}|}\right).
+\end{equation}
+This expression applies when the fraction inside the logarithm lies
+strictly between zero and one. Otherwise, depletion does not occur
+in finite time before equilibrium is reached; populations already
+at or below a monolayer are inactive. At the earliest depletion
+event, the affected population is removed from the participating
+set, the coefficients are recomputed, and the analytic solution is
+continued over the remaining interval. Initially underfilled
+populations are not raised to a monolayer.
+
+Large phase changes can invalidate the fixed-radius approximation
+over the full transport timestep. We therefore divide the chemistry
+interval into adaptive local substeps. Let $\Sigma_{\mathrm d,k,0}$
+and $a_{k,0}$ denote the total dust surface density and grain radius
+at the start of chemistry. Since grain number and material density
+remain fixed until remapping, the radius at a substep boundary is
+\begin{equation}
+    a_k(t_n)=a_{k,0}
+    \left[1+\frac{\displaystyle\sum_X
+    \left(\Sigma_{X^{\mathrm{ice}},k}(t_n)
+    -\Sigma_{X^{\mathrm{ice}},k,0}\right)}
+    {\Sigma_{\mathrm d,k,0}}\right]^{1/3}.
+    \label{eq:simultaneous_radius_mass}
+\end{equation}
+All species use this same radius throughout a proposed substep.
+Their transfers are calculated independently with
+Eq.~\eqref{eq:analytic_ice_substep}, including depletion events,
+and are then applied together. The shared radii and monolayer
+inventories are recalculated before the next substep. This avoids
+assigning different geometries to species according to their order
+in the chemistry update.
+
+To control the radius approximation, define the gross transferred
+mass in population $k$ during a trial substep as
+\begin{equation}
+    Q_k=\sum_X\left|\delta\Sigma_{X^{\mathrm{ice}},k}\right|.
+\end{equation}
+We accept the substep only if every populated bin satisfies
+\begin{equation}
+    \frac{Q_k}{\Sigma_{\mathrm d,k}(t_n)}
+    \leq 1-(1-\epsilon_a)^3,
+    \label{eq:chemistry_radius_control}
+\end{equation}
+where $\Sigma_{\mathrm d,k}(t_n)$ includes all ice changes already
+accepted during chemistry. Because each species transfers mass in
+one direction at fixed temperature and geometry, $Q_k$ also bounds
+the absolute net mass change at intermediate times in the trial
+solution. Equation~\eqref{eq:chemistry_radius_control} therefore
+bounds both growth and shrinkage of the reconstructed radius by
+$\epsilon_a$. Using the gross transfer prevents condensation and
+sublimation of different species from hiding a radius excursion by
+canceling in the final net mass change.
+
+Each cell first attempts its entire remaining chemistry interval.
+If the trial violates Eq.~\eqref{eq:chemistry_radius_control}, it is
+discarded and repeated with a shorter interval. Instantaneous phase
+rates provide a timestep estimate, excluding species whose total
+trial transfer is negligible compared with the permitted mass
+change. This prevents a rapidly depleted, nearly bare species from
+forcing unnecessarily short steps for other species. Acceptance
+always depends on the actual trial transfers. Cells with little
+phase exchange can complete chemistry in one substep, while cells
+undergoing large mantle changes take more substeps without reducing
+the global transport timestep. We adopt $\epsilon_a=0.01$ as the
+default. This is a local geometry bound rather than a prescribed
+relative error in the final ice inventories; convergence is assessed
+by reducing $\epsilon_a$.
+
+The final frozen-radius substep can leave an excess above the
+monolayer corresponding to the final, smaller grains. We retain a
+single additional shrinkage correction before remapping. It applies
+to populations whose remaining inventory is at or below the
+monolayer evaluated at the start of the full chemistry step. The
+proposed release is the positive excess above the monolayer evaluated
+at the final radius. It is accepted only if the sublimation rate,
+evaluated using the vapor deficit after the proposed total release,
+can remove it within $0.01\Delta t$. Corrections for all species are
+calculated from the same state before being applied. Their additional
+radius changes are not iterated, but their mass transfers are included
+in the subsequent remapping. Remapping is performed once, after all
+local chemistry substeps and this correction have completed.
