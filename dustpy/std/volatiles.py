@@ -2,6 +2,7 @@
 import numpy as np
 import scipy.sparse as sp
 import time
+from astropy import constants as ac
 
 from dustpy import std
 from dustpy.std import ice_f, sim
@@ -13,7 +14,11 @@ def chemistry_updater(sim):
     """Exchange phases with variable radius unless explicitly disabled."""
 
     # Run the sublimation and condensation chemistry for all volatile species
-    delta_ice, delta_vapor = std.chemistry.sublimation_condensation_all(sim)
+    has_carbon = hasattr(sim, 'refractory_carbon')
+    if has_carbon:
+        delta_ice, delta_vapor, delta_carbon = std.chemistry.solid_chemistry_all(sim)
+    else:
+        delta_ice, delta_vapor = std.chemistry.sublimation_condensation_all(sim)
 
     # Update the surface densities of each volatile species based on the changes in ice and vapor surface densities
     for x, name in enumerate(sim.volatiles.names):
@@ -25,11 +30,18 @@ def chemistry_updater(sim):
 
     # Update the dust chemistry delta and gas surface density based on the total changes in ice and vapor
     sim.dust.Sigma.chemdelta += delta_ice.sum(axis=0)
-    sim.gas.Sigma += delta_vapor.sum(axis=0)
+    if has_carbon:
+        sim.refractory_carbon.Sigma += delta_carbon
+        sim.dust.Sigma.chemdelta += delta_carbon
+        sim.gas.Sigma -= delta_ice.sum(axis=(0, 2))+delta_carbon.sum(axis=-1)
+    else:
+        sim.gas.Sigma += delta_vapor.sum(axis=0)
 
 
 def finalize_volatiles(sim):
-    """Transport all species, exchange phases together, then remap once."""
+    """Evolve the volatile species through phase changes and remap them back onto the mass grid"""
+    if hasattr(sim, 'refractory_carbon'):
+        sim.refractory_carbon.Sigma.update()
     chemistry_updater(sim)
     remap_updater(sim)
 
@@ -57,7 +69,11 @@ def remap_updater(sim):
         sim.gas.Sigma += released.sum(axis=(0, 2))
 
     # Remap once to account for the chemistry mass exchange.
-    dust_new, ice_new = std.chemistry.remapper(sim)
+    has_carbon = hasattr(sim, 'refractory_carbon')
+    if has_carbon:
+        dust_new, ice_new, carbon_new = std.chemistry.remapper(sim, include_carbon=True)
+    else:
+        dust_new, ice_new = std.chemistry.remapper(sim)
 
     # Update the dust surface density and enforce floor value
     sim.dust.Sigma = dust_new
@@ -68,8 +84,57 @@ def remap_updater(sim):
         getattr(sim.volatiles, volatile_name).Sigmaice = ice_new[i]
         std.ice.enforce_floor_value(getattr(sim.volatiles, volatile_name).Sigmaice)
 
+    if has_carbon:
+        sim.refractory_carbon.Sigma = carbon_new
+        std.ice.enforce_floor_value(sim.refractory_carbon.Sigma)
+
     # Reset the chemistry delta for the next timestep
     sim.dust.Sigma.chemdelta *= 0
+
+
+def add_refractory_carbon(sim, initial_distribution, prefactor=4.e13,
+                          activation_temperature=24500.):
+    """Label existing dust as refractory-organic carbon, after add_volatiles.
+
+    The finite, nonnegative initial distribution has shape (Nr, Nm) and
+    counts carbon mass [g/cm²], not total CHON mass. CH4 must be a volatile.
+    Carbon plus ice must leave a positive nonvolatile grain remainder.
+    Prefactor [s^-1] and activation temperature [K] are the adopted organic
+    pyrolysis coefficients of Gail & Trieloff (2017), Appendix A, Table A.2.
+    All released carbon forms CH4 using untracked background gas hydrogen.
+    """
+
+    if not hasattr(sim, 'volatiles') or 'CH4' not in sim.volatiles.names:
+        raise ValueError('Add volatile CH4 before adding refractory carbon.')
+    
+    initial = np.array(initial_distribution, dtype=float, copy=True)
+    dust = np.asarray(sim.dust.Sigma)
+
+    # Validate coefficients before changing the simulation.
+    std.chemistry.refractory_carbon_rate(500., prefactor, activation_temperature)
+    ice = sum(np.asarray(getattr(sim.volatiles, n).Sigmaice) for n in sim.volatiles.names)
+
+    if np.any((dust > sim.dust.SigmaFloor) & (initial+ice >= dust)):
+        raise ValueError('Carbon plus ice must leave a positive nonvolatile grain remainder.')
+
+    sim.addgroup('refractory_carbon', description='Carbon in refractory organic solids')
+    carbon = sim.refractory_carbon
+    carbon.addfield('mass', 12.011*ac.u.cgs.value, description='Carbon atomic mass [g]')
+    carbon.addfield('prefactor', float(prefactor), description='Pyrolysis prefactor [1/s]')
+    carbon.addfield('activation_temperature', float(activation_temperature), description='Pyrolysis activation temperature [K]')
+    carbon.addfield('Sigma', initial.copy(), description='Solid carbon surface density [g/cm²]')
+    field = carbon.Sigma
+    field.boundary = Group(sim, description='Boundary conditions')
+    field.SigmaFloor = np.zeros_like(dust)
+    std.ice.set_initial_boundary(sim, field)
+    std.ice.finalize_implicit(field)
+
+    def carbon_updater(sim):
+        carbon.Sigma = std.ice.evolve_implicit(sim, field)
+        std.ice.finalize_implicit(field)
+
+    # Called once by finalize_volatiles, after ordinary volatile transport.
+    field.updater.updater = carbon_updater
 
 
 def add_volatile(sim, volatile_name, initial_distribution):
@@ -141,7 +206,7 @@ def add_volatile(sim, volatile_name, initial_distribution):
 
     # Define and set updater for dynamic/collisional evolution of the ice species
     def ice_updater(sim):
-        """Evolve the solid component of the volatile."""
+        """Evolve the solid component of the volatile through transport and collisional processes."""
 
         volatile.Sigmaice = std.ice.evolve_implicit(
             sim,
@@ -171,7 +236,7 @@ def add_volatile(sim, volatile_name, initial_distribution):
 
     # Define and set updater for dynamic evolution of the vapor species
     def vapor_updater(sim):
-        """Evolve the gaseous component of the volatile."""
+        """Evolve the gaseous component of the volatile through transport processes."""
 
         volatile.Sigmavap = std.vapor.evolve_implicit(sim, vapor_field)
 

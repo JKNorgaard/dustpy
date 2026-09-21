@@ -175,14 +175,20 @@ def _constant_radius(dt, ice, vapor, equilibrium, collision, monolayer):
 
 def _adaptive_radius(dt, ice, vapor, equilibrium, dust, radius, collision,
                    monolayer, molecular_radius, radius_tolerance=0.01,
-                   max_substeps=10000):
+                   max_substeps=10000, carbon=None, carbon_rate=0.,
+                   methane_index=None, methane_mass_ratio=1., variable_radius=True):
     """ Adaptive phase exchange for one radial bin with variable grain radius, with depletion substepping.
     
     Arrays have shape (species, bins), except vapor/equilibrium (species,).
     """
 
     # Initialize bookkeeping array for change in ice surface density
-    change = np.zeros_like(ice)
+    ice_change = np.zeros_like(ice)
+    carbon_change = np.zeros_like(dust)
+    has_carbon = carbon is not None
+
+    def result():
+        return (ice_change, carbon_change) if has_carbon else ice_change
 
     # Initialize the remaining time for the current timestep
     remaining = float(dt)
@@ -193,34 +199,60 @@ def _adaptive_radius(dt, ice, vapor, equilibrium, dust, radius, collision,
     # Loop over substeps with a maximum of max_substeps iterations to ensure convergence
     for _ in range(max_substeps):
 
-        # If there is no remaining time or no ice to transfer, return the change in ice surface density
-        if remaining <= 0.0 or ice.size == 0:
-            return change
+        # If there is no remaining time or no ice to transfer, return the changes
+        if remaining <= 0.0:
+            return result()
 
         # Calculate the total mass of dust and volatile ices in each bin
-        mass = dust+change.sum(axis=0)
-        if np.any(mass <= 0.0):
-            raise RuntimeError('Chemistry exhausted the grain mass.')
+        mass = dust+ice_change.sum(axis=0)+carbon_change
 
         # Calculate the new grain radius 
-        a = radius*np.cbrt(mass/dust)
+        if variable_radius:
+            a = radius*np.cbrt(mass/dust)
+        else:
+            a = radius
 
         # Calculate the collision rates and monolayer surface densities for new grain radius
         rates = collision*(a/radius)[None, :]**2
         ml = monolayer*(a[None, :]+molecular_radius[:, None])**2
 
         # Update ice and vapor for change in surface density
-        current_ice = ice+change
-        current_vapor = vapor-change.sum(axis=1)
+        current_ice = ice+ice_change
+        current_vapor = vapor-ice_change.sum(axis=1)
+        if has_carbon:
+            current_carbon = np.maximum(carbon+carbon_change, 0.)
+            current_vapor[methane_index] -= methane_mass_ratio*carbon_change.sum()
 
 
         h = remaining
+        if has_carbon and carbon_rate > 0:
+            # An exact bound avoids repeatedly halving long trials when
+            # destruction is very fast. Exhaustible small reservoirs do not
+            # restrict the timestep once their entire mass fits the budget.
+            fraction = np.divide(mass_tolerance*mass, current_carbon,
+                out=np.full_like(mass, np.inf), where=current_carbon > 0)
+            limiting = fraction < 1
+            if np.any(limiting):
+                h = min(h, float(np.min(-np.log1p(-fraction[limiting])/carbon_rate)))
         for _ in range(100):
+            trial_carbon = np.zeros_like(dust)
+            if has_carbon:
+                with np.errstate(over='ignore'):
+                    trial_carbon = current_carbon*np.expm1(-carbon_rate*h)
+                # Midpoint supply and geometry: split the exact carbon loss
+                # equally around ice exchange, then commit both together.
+                supplied_vapor = current_vapor.copy()
+                supplied_vapor[methane_index] -= 0.5*methane_mass_ratio*trial_carbon.sum()
+                mid_a = radius*np.cbrt((mass+0.5*trial_carbon)/dust) if variable_radius else radius
+                trial_rates = collision*(mid_a/radius)[None, :]**2
+                trial_ml = monolayer*(mid_a[None, :]+molecular_radius[:, None])**2
+            else:
+                supplied_vapor, trial_rates, trial_ml = current_vapor, rates, ml
             # Calculate the trial change in ice surface density for the current substep
-            trial = _constant_radius(h, current_ice, current_vapor, equilibrium, rates, ml)
+            trial = _constant_radius(h, current_ice, supplied_vapor, equilibrium, trial_rates, trial_ml)
 
             # Calculate the gross change in ice surface density for the current substep
-            gross = np.abs(trial).sum(axis=0)
+            gross = np.abs(trial).sum(axis=0)-trial_carbon
 
             # If the gross change is within the mass tolerance, break the loop and accept the trial change
             if np.all(gross <= mass_tolerance*mass):
@@ -244,6 +276,8 @@ def _adaptive_radius(dt, ice, vapor, equilibrium, dust, radius, collision,
 
             # Calculate the gross rate of significant bins
             gross_rate = np.abs(flux).sum(axis=0)
+            if has_carbon:
+                gross_rate += carbon_rate*current_carbon
 
             # Calculate a new timestep based on the mass tolerance and gross rate, ensuring it is positive and finite
             bound = np.divide(mass_tolerance*mass, gross_rate,
@@ -258,17 +292,36 @@ def _adaptive_radius(dt, ice, vapor, equilibrium, dust, radius, collision,
             raise RuntimeError('Adaptive chemistry could not bound the radius change.')
 
         # Update the change in ice surface density and remaining time for the current timestep
-        change += trial
+        ice_change += trial
+        carbon_change += trial_carbon
         remaining = max(0.0, remaining-h)
 
         # If there is no remaining time, return the change in ice surface density
         if remaining == 0.0:
-            return change
+            return result()
     raise RuntimeError('Adaptive chemistry exceeded max_substeps.')
 
 
 def sublimation_condensation_all(sim, radius_tolerance=None, max_substeps=10000):
-    """Return phase changes, shapes (Ns,Nr,Nm), (Ns,Nr).
+    """Ice-only interface. Carbon-enabled callers must use solid_chemistry_all."""
+    if hasattr(sim, 'refractory_carbon'):
+        raise ValueError('Use solid_chemistry_all for coupled carbon/ice chemistry.')
+    ice, vapor, _ = solid_chemistry_all(sim, radius_tolerance, max_substeps)
+    return ice, vapor
+
+
+def refractory_carbon_rate(temperature, prefactor=4.e13, activation_temperature=24500.):
+    """Organic-carbon decay rate [s^-1]; Gail & Trieloff (2017), Table A.2.
+
+    Temperature is in K. These adopted organic-pyrolysis coefficients do not
+    describe pure graphite sublimation. CH4 yield is a separate assumption.
+    """
+    temperature = np.asarray(temperature, dtype=float)
+    return prefactor*np.exp(-activation_temperature/temperature)
+
+
+def solid_chemistry_all(sim, radius_tolerance=None, max_substeps=10000):
+    """Return ice, vapor, carbon changes: (Ns,Nr,Nm), (Ns,Nr), (Nr,Nm).
 
     Call after transport of ALL species and before any chemistry/remapping.
     T, H_d, N, solid density and equilibrium vapor pressures remain fixed.
@@ -279,6 +332,8 @@ def sublimation_condensation_all(sim, radius_tolerance=None, max_substeps=10000)
 
     # Get the names of all volatile species in the simulation
     names = tuple(sim.volatiles.names)
+    carbon_species = getattr(sim, 'refractory_carbon', None)
+    has_carbon = carbon_species is not None
 
     # Stack the ice and vapor surface densities for all species into arrays
     ice = np.stack([np.asarray(getattr(sim.volatiles, n).Sigmaice) for n in names])
@@ -293,8 +348,11 @@ def sublimation_condensation_all(sim, radius_tolerance=None, max_substeps=10000)
     if radius_tolerance is None:
         radius_tolerance = getattr(sim.volatiles, 'chemistry_radius_tolerance', 0.01)
 
-    # Initialize bookkeeping array for change in ice surface density
-    change = np.zeros_like(ice)
+    # Initialize bookkeeping array for change in ice and carbon surface density
+    ice_change = np.zeros_like(ice)
+    carbon_change = np.zeros_like(sim.dust.Sigma)
+    if dt == 0:
+        return ice_change, np.zeros_like(vapor), carbon_change
 
     # Define simulation quantities for the adaptive chemistry calculations
     dust = np.asarray(sim.dust.Sigma)
@@ -306,12 +364,19 @@ def sublimation_condensation_all(sim, radius_tolerance=None, max_substeps=10000)
 
     # Check for invalid conditions in the dust and ice surface densities
     resolved = dust > floor
-    invalid = (dust < 0) | np.any(ice < 0, axis=0) | (
-        resolved & (ice.sum(axis=0) > dust*(1+1e-10)))
-    if np.any(invalid):
-        r, k = np.argwhere(invalid)[0]
-        raise ValueError(f'Inconsistent total ice at radial bin {r}, mass bin {k}: '
-                         f'ice={ice[:,r,k].sum():.17g}, dust={dust[r,k]:.17g}.')
+    if has_carbon:
+        carbon = np.asarray(carbon_species.Sigma)
+    else:
+        carbon = np.zeros_like(dust)
+
+    if has_carbon:
+        rate = refractory_carbon_rate(sim.gas.T, float(carbon_species.prefactor), float(carbon_species.activation_temperature))
+        methane_index = names.index('CH4')
+        methane_ratio = float(sim.volatiles.CH4.mass/carbon_species.mass)
+
+        carbon_change = carbon*np.expm1(-rate[:, None]*dt)
+        carbon_change[~resolved] = 0.
+        carbon_change[[0, -1]] = 0.
     
     # Calculate the monolayer surface density, equilibrium vapor surface density, and thermal velocity for each volatile species
     quantities = [volatile_quantities(sim, n) for n in names]
@@ -333,6 +398,11 @@ def sublimation_condensation_all(sim, radius_tolerance=None, max_substeps=10000)
     # Loop over radial bins and calculate the change in ice surface density for each volatile species
     for r in range(dust.shape[0]):
 
+        # Boundary rows are imposed by transport; the inner dust row is
+        # also preserved by the remapper. Do not generate vapor there.
+        if has_carbon and r in (0, dust.shape[0]-1):
+            continue
+
         # Only consider radial bins that have more dust than the floor value
         use = resolved[r]
         if not np.any(use):
@@ -340,9 +410,21 @@ def sublimation_condensation_all(sim, radius_tolerance=None, max_substeps=10000)
 
         # Calculate change in ice surface density using adaptive chemistry or constant-radius chemistry based on the variable_radius flag
         try:
-            if variable_radius:
+            # At machine-scale loss, retain the original ice solver. The
+            # exact (possibly tiny) carbon loss still feeds methane below.
+            reactive = has_carbon and np.any(
+                -carbon_change[r, use] > 8*np.finfo(float).eps*dust[r, use])
+            if reactive:
+                ice_change[:, r, use], carbon_change[r, use] = _adaptive_radius(
+                    dt, ice[:, r, use], vapor[:, r], equilibrium[:, r],
+                    dust[r, use], radius[r, use], collision[:, r, use],
+                    mono[:, r, use], r_mol, radius_tolerance, max_substeps,
+                    carbon=carbon[r, use], carbon_rate=rate[r],
+                    methane_index=methane_index, methane_mass_ratio=methane_ratio,
+                    variable_radius=variable_radius)
+            elif variable_radius:
                 # If variable_radius is True, use the adaptive radius chemistry method
-                change[:, r, use] = _adaptive_radius(
+                ice_change[:, r, use] = _adaptive_radius(
                     dt, ice[:, r, use], vapor[:, r], equilibrium[:, r],
                     dust[r, use], radius[r, use], collision[:, r, use],
                     mono[:, r, use], r_mol, radius_tolerance=radius_tolerance,
@@ -350,14 +432,17 @@ def sublimation_condensation_all(sim, radius_tolerance=None, max_substeps=10000)
             else:
                 # If variable_radius is False, use the constant-radius chemistry method
                 monolayer = mono[:, r, use] * (radius[r, use][None, :] + r_mol[:, None])**2
-                change[:, r, use] = _constant_radius(
+                ice_change[:, r, use] = _constant_radius(
                     dt, ice[:, r, use], vapor[:, r], equilibrium[:, r],
                     collision[:, r, use], monolayer)
         except RuntimeError as error:
             raise RuntimeError(f'Chemistry at radial bin {r}: {error}') from error
 
         # Return the change in ice surface density and the negative sum of the change equal to the change in vapor surface density
-    return change, -change.sum(axis=-1)
+    vapor_change = -ice_change.sum(axis=-1)
+    if has_carbon:
+        vapor_change[methane_index] -= methane_ratio*carbon_change.sum(axis=-1)
+    return ice_change, vapor_change, carbon_change
 
 
 def monolayer_shrinkage(sim):
@@ -417,10 +502,10 @@ def monolayer_shrinkage(sim):
     return np.stack(released)
 
 
-def remapper(sim):
+def remapper(sim, include_carbon=False):
     """
-    Remap the dust and all volatile ice surface densities, keeping
-    particle radii and Stokes numbers consistent with ice gained/lost
+    Remap dust, volatile ice, and optional refractory carbon, keeping
+    particle radii and Stokes numbers consistent with solid mass gained/lost
     during the chemistry step.
 
     The total change in ice mass across all volatile species determines
@@ -431,6 +516,8 @@ def remapper(sim):
     ----------
     sim : Frame
         Parent simulation frame.
+    include_carbon : bool
+        Required for carbon-bearing simulations; return a third array.
 
     Returns
     -------
@@ -440,11 +527,16 @@ def remapper(sim):
     ice_new : ndarray
         Remapped ice surface densities with shape
         (Nvolatiles, Nr, Nm). The first dimension follows the order in
-        sim.volatiles.species.
+        sim.volatiles.names.
+    carbon_new : ndarray, optional
+        Remapped carbon surface density (Nr, Nm), when include_carbon=True.
     """
 
     volatiles_names = sim.volatiles.names
     n_volatiles = len(volatiles_names)
+    has_carbon = hasattr(sim, 'refractory_carbon')
+    if has_carbon and not include_carbon:
+        raise ValueError('Use include_carbon=True when remapping carbon-bearing grains.')
 
     # Current dust distribution
     dust = np.copy(sim.dust.Sigma)
@@ -455,6 +547,9 @@ def remapper(sim):
         np.copy(getattr(sim.volatiles, volatile_name).Sigmaice)
         for volatile_name in volatiles_names
     ])
+    if has_carbon:
+        ice = np.concatenate([ice, np.asarray(sim.refractory_carbon.Sigma)[None]])
+        n_volatiles += 1
 
     # Total change in grain mass due to all volatile chemistry
     # Shape: (Nr, Nm)
@@ -554,4 +649,7 @@ def remapper(sim):
         dust_new[r, :] = dust_r_new
         ice_new[:, r, :] = ice_r_new
 
+    if include_carbon:
+        return dust_new, ice_new[:-1] if has_carbon else ice_new, (
+            ice_new[-1] if has_carbon else np.zeros_like(dust))
     return dust_new, ice_new
