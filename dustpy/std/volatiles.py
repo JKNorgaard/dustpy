@@ -39,7 +39,7 @@ def chemistry_updater(sim):
 
 
 def finalize_volatiles(sim):
-    """Evolve the volatile species through phase changes and remap them back onto the mass grid"""
+    """Apply phase changes and optionally remap solids onto the mass grid."""
     if hasattr(sim, 'refractory_carbon'):
         sim.refractory_carbon.Sigma.update()
     chemistry_updater(sim)
@@ -47,15 +47,16 @@ def finalize_volatiles(sim):
 
 
 def remap_updater(sim):
-    """Function defines the updater function for remapping surface densities back onto the mass grid.
-       This function is called at each time step to update the dust surface density based on the change in ice species surface densities.
+    """Apply solid chemistry mass changes, optionally redistributing mass bins.
+
+       Set sim.volatiles.remapping = False to keep solids in their current
+       mass bins. Chemistry, including the monolayer correction controlled
+       by chemistry_variable_radius, still updates dust, ice, and gas.
     
         Parameters
         ----------
         sim : Frame
             Parent simulation frame
-        volatiles : list of str
-            List of volatile species in the simulation frame
         """
     if getattr(sim.volatiles, 'chemistry_variable_radius', True):
         # Correct monolayers once using the radius after ordinary chemistry.
@@ -68,9 +69,18 @@ def remap_updater(sim):
         sim.dust.Sigma.chemdelta -= released.sum(axis=0)
         sim.gas.Sigma += released.sum(axis=(0, 2))
 
-    # Remap once to account for the chemistry mass exchange.
+    # Apply chemistry mass exchange even when redistribution is disabled.
     has_carbon = hasattr(sim, 'refractory_carbon')
-    if has_carbon:
+    if not getattr(sim.volatiles, 'remapping', True):
+        dust_new = np.array(sim.dust.Sigma, copy=True)
+        # Preserve the inner boundary, as in the remapper.
+        dust_new[1:] += sim.dust.Sigma.chemdelta[1:]
+        ice_new = np.stack([
+            getattr(sim.volatiles, name).Sigmaice for name in sim.volatiles.names
+        ])
+        if has_carbon:
+            carbon_new = np.array(sim.refractory_carbon.Sigma, copy=True)
+    elif has_carbon:
         dust_new, ice_new, carbon_new = std.chemistry.remapper(sim, include_carbon=True)
     else:
         dust_new, ice_new = std.chemistry.remapper(sim)
@@ -258,12 +268,19 @@ def add_volatiles(sim, volatiles, initial_distributions=None):
     initial_distributions : list of float, optional
         List of initial distributions for each volatile species. 
         If not provided, the initial distribution will be set to a uniform distribution based on the dust surface density.
+
+    Notes
+    -----
+    Remapping is enabled by default. After adding volatiles, set
+    ``sim.volatiles.remapping = False`` to apply chemistry surface-density
+    changes in the existing mass bins without redistributing solids.
     """
 
     # Create a new group for volatile species in the simulation frame
     sim.addgroup("volatiles", description="Volatile species")
 
     sim.volatiles.names = tuple(volatiles)
+    sim.volatiles.remapping = True
     sim.volatiles.chemistry_variable_radius = True
     sim.volatiles.chemistry_radius_tolerance = 0.01
 
