@@ -557,7 +557,7 @@ def remapper(sim, include_carbon=False):
 
     # Total change in grain mass due to all volatile chemistry
     # Shape: (Nr, Nm)
-    ice_delta_total = sim.dust.Sigma.chemdelta.copy()
+    ice_delta_total = np.array(sim.dust.Sigma.chemdelta, copy=True)
 
     # Bookkeeping arrays
     dust_new = np.zeros_like(dust)
@@ -568,7 +568,7 @@ def remapper(sim, include_carbon=False):
     ice_new[:, 0, :] = ice[:, 0, :]
 
     # Constants
-    B = sim.grid.B
+    B = float(sim.grid.B)
     log_B = np.log(B)
     n_r, n_sigma = dust.shape
     denom = 1.0 / (B - 1.0)

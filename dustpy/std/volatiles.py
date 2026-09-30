@@ -37,11 +37,16 @@ def chemistry_updater(sim):
     else:
         sim.gas.Sigma += delta_vapor.sum(axis=0)
 
-
 def finalize_volatiles(sim):
-    """Apply phase changes and optionally remap solids onto the mass grid."""
-    if hasattr(sim, 'refractory_carbon'):
-        sim.refractory_carbon.Sigma.update()
+    """Finish solid transport, then apply chemistry and remapping."""
+    try:
+        if hasattr(sim, "refractory_carbon"):
+            sim.refractory_carbon.Sigma.update()
+    finally:
+        # Carbon is the last solid tracer to use this solver.
+        # Release it before chemistry and simulation output.
+        sim.dust._ice_lu = None
+
     chemistry_updater(sim)
     remap_updater(sim)
 

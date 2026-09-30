@@ -1,5 +1,7 @@
 '''Module containing standard functions for ice species.'''
 
+from dataclasses import field
+
 import numpy as np
 import scipy.sparse as sp
 import time
@@ -122,9 +124,9 @@ def build_J_coag(sim):
     irm     = sim.dust.coagulation.rm_ind
     m       = sim.grid.m
     phi     = sim.dust.coagulation.phi
-    Rf      = sim.dust.kernel_old * sim.dust.p.frag_old
-    Rs      = sim.dust.kernel_old * sim.dust.p.stick_old 
-    SigD    = sim.dust._sigmaOld.copy()
+    Rf = sim.dust._ice_Rf
+    Rs = sim.dust._ice_Rs
+    SigD = np.asarray(sim.dust._sigmaOld)
     SigDfl  = sim.dust.SigmaFloor
     Xi      = sim.dust.coagulation.Xi_ice
     Nr      = sim.grid.Nr
@@ -236,12 +238,12 @@ def assemble_rhs(sim, field):
     iLF         = sim.dust.coagulation.lf_ind
     iStick      = sim.dust.coagulation.stick_ind_ice
     phi         = sim.dust.coagulation.phi
-    Rf          = sim.dust.kernel_old * sim.dust.p.frag_old 
-    Rs          = sim.dust.kernel_old * sim.dust.p.stick_old 
-    Sigma_dust  = sim.dust._sigmaOld.copy()
+    Rf          = sim.dust._ice_Rf
+    Rs          = sim.dust._ice_Rs
+    Sigma_dust  = np.asarray(sim.dust._sigmaOld)
+    Sigma_ice   = np.asarray(field)
     SigmaFloor  = sim.dust.SigmaFloor
-    Sigma_ice   = field.copy()
-    Xi       = sim.dust.coagulation.Xi_ice
+    Xi          = sim.dust.coagulation.Xi_ice
 
     # M matrix is calculated
     M = ice_f.m_generator(A, cStick, eps, iLF, iRM, iStick, m, phi, Rf, Rs, Sigma_dust, Sigma_ice, SigmaFloor, Xi, Nr, Nm)
@@ -257,71 +259,37 @@ def assemble_rhs(sim, field):
     rhs[Nm:-Nm] += rhs1[Nm:-Nm] + rhs2[Nm:-Nm]
     return rhs 
 
+def _get_ice_solver(sim):
+    """Build once and reuse across solid tracers in this transport step."""
+    solver = getattr(sim.dust, "_ice_lu", None)
+    if solver is None:
+        dt = float(sim.t.prevstepsize)
+
+        J_coag = build_J_coag(sim)
+        J_ice = (
+            sim.dust._J_hyd
+            + J_coag
+            + sim.dust._J_boundary
+        )
+
+        A = sp.identity(J_ice.shape[0], format="csc") - dt * J_ice
+
+        solver = sp.linalg.splu(
+            A,
+            permc_spec="MMD_AT_PLUS_A",
+            diag_pivot_thresh=0.0,
+            options=dict(SymmetricMode=True),
+        )
+        sim.dust._ice_lu = solver
+
+    return solver
 
 def evolve_implicit(sim, field):
-    """
-    Advance Σ_ice implicitly for one step.
-    Solves the matrix equation: ΔΣ_ice * A = RHS for ΔΣ_ice
-    Where RHS = Σ_ice^i + (M * Σ_dust^(t+Δt) / m) * Δt, and A = (1 - Δt*J_ice)
+    """Advance one solid tracer using the shared transport matrix."""
+    solver = _get_ice_solver(sim)
 
-    Parameters
-    ----------
-    sim : Frame
-    field : Field, Parent field
-
-    Returns
-    -------
-    Y1  : Ice surface density Σ_ice at t+dt 
-    """
-
-    # Ice surface density we wish to evolve
-    Y0 = field.copy()
-
-    # Time step size used in dust routine
-    dt = sim.t.prevstepsize
-
-    # Retrieve hydrodynamics and boundary jacobians from dust routine
-    J_hyd = sim.dust._J_hyd 
-    J_boundary = sim.dust._J_boundary
-    #bf = time.perf_counter()
-    # Build coagulation jacobian for ice
-    J_coag = build_J_coag(sim)
-    #af = time.perf_counter()
-    #print(f"Ice jacobian time = {af - bf:.3f}")
-    # Build total jacobian J_ice = J_hyd + J_coag_ice + J_boundary
-    J_ice = (J_hyd + J_coag + J_boundary)
-    #bf = time.perf_counter()
-    # Enforce boundary conditions on RHS
+    # These remain specific to each tracer.
     rhs_boundary(sim, field)
-    #af = time.perf_counter()
-    #print(f"Ice jacobian boundary time = {af - bf:.3f}")
-
-    #bf = time.perf_counter()
-    # Assemble RHS 
     rhs = assemble_rhs(sim, field)
-    #af = time.perf_counter() 
-    #print(f"Assembling rhs time = {af - bf:.3f}")
 
-    #bf = time.perf_counter()
-    # Identity matrix
-    N = J_ice.shape[0]
-    I = sp.identity(N, format="csc")
-
-    # Calculate A
-    A = I - dt * J_ice
-
-    # LU factorize 
-    A_LU = sp.linalg.splu(A,
-                        permc_spec="MMD_AT_PLUS_A", 
-                        diag_pivot_thresh=0.0,
-                        options=dict(SymmetricMode=True)
-    )
-
-    # Solve the matrix equation and reshape
-    Y1_ravel = A_LU.solve(rhs)
-    #af = time.perf_counter()
-    #print(f"Solving ice evo time = {af - bf:.3f}")
-    Y1 = Y1_ravel.reshape(Y0.shape)
-
-    return Y1
-
+    return solver.solve(np.asarray(rhs)).reshape(field.shape)

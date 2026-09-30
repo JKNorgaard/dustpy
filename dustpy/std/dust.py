@@ -56,6 +56,14 @@ def prepare(sim):
     sim.dust.p.stick_old = sim.dust.p.stick.copy()
     sim.dust.p.frag_old = sim.dust.p.frag.copy()
 
+    # Collision rates shared by all solid tracers during this step.
+    kernel = np.asarray(sim.dust.kernel_old)
+    sim.dust._ice_Rf = kernel * np.asarray(sim.dust.p.frag_old)
+    sim.dust._ice_Rs = kernel * np.asarray(sim.dust.p.stick_old)
+
+    # Rebuild the solid transport solver for the new dust state.
+    sim.dust._ice_lu = None
+
 
 def finalize_explicit(sim):
     """Function finalizes integration step.
