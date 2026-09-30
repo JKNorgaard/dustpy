@@ -89,15 +89,21 @@ def _constant_radius(dt, ice, vapor, equilibrium, collision, monolayer):
         if deficit == 0.0:
             continue
 
+        # Cache row views once per species; change_x updates change in place.
+        ice_x = ice[x]
+        collision_x = collision[x]
+        monolayer_x = monolayer[x]
+        change_x = change[x]
+
         # Determine if the species is condensing or sublimating
         condensing = deficit > 0.0
 
         # Only consider bins that have positive collision rates
-        active = collision[x] > 0.0
+        active = collision_x > 0.0
 
         # For sublimation, only consider non-bare bins
         if not condensing:
-            active &= ice[x] > monolayer[x]
+            active &= ice_x > monolayer_x
 
         # Initialize the remaining time for the current timestep
         remaining = float(dt)
@@ -106,7 +112,7 @@ def _constant_radius(dt, ice, vapor, equilibrium, collision, monolayer):
         for _ in range(ice.shape[1]+1):
 
             # Calculate the summed collision rates for the active bins
-            rates = np.where(active, collision[x], 0.0)
+            rates = np.where(active, collision_x, 0.0)
             total = rates.sum()
 
             # If there are no active bins or no remaining time, break the loop
@@ -117,7 +123,7 @@ def _constant_radius(dt, ice, vapor, equilibrium, collision, monolayer):
             weights = rates/total
 
             # Calculate the mass available for sublimation or condensation
-            available = max(0.0, np.sign(deficit)*(deficit-change[x].sum()))
+            available = max(0.0, np.sign(deficit)*(deficit-change_x.sum()))
             if available == 0.0:
                 break
 
@@ -125,7 +131,7 @@ def _constant_radius(dt, ice, vapor, equilibrium, collision, monolayer):
             event_time = np.inf
             if not condensing:
                 # Calculate the remaining ice capacity for sublimation
-                capacity = np.maximum(ice[x]+change[x]-monolayer[x], 0.0)
+                capacity = np.maximum(ice_x+change_x-monolayer_x, 0.0)
 
                 # Calculate the total sublimation across all bins required for making each bin bare
                 required = np.divide(capacity, weights, out=np.full_like(weights, np.inf), where=active)
@@ -155,7 +161,7 @@ def _constant_radius(dt, ice, vapor, equilibrium, collision, monolayer):
                 delta = -np.minimum(delta, capacity)
 
             # Update the change in ice surface density for the current species
-            change[x] += delta
+            change_x += delta
 
             # Check if the substep is the last one
             finished = step == remaining
@@ -166,9 +172,9 @@ def _constant_radius(dt, ice, vapor, equilibrium, collision, monolayer):
                 # The full remaining interval has been integrated.
                 break
 
-            # If a bin becomes bare, remove it from the active set for the next substep
+            # Remove every bin with the same depletion threshold. 
             if event_time <= step:
-                active[first] = False
+                active &= required > required[first]
             else:
                 break
     return change
@@ -239,17 +245,15 @@ def _adaptive_radius(dt, ice, vapor, equilibrium, dust, radius, collision,
             if has_carbon:
                 with np.errstate(over='ignore'):
                     trial_carbon = current_carbon*np.expm1(-carbon_rate*h)
-                # Midpoint supply and geometry: split the exact carbon loss
-                # equally around ice exchange, then commit both together.
-                supplied_vapor = current_vapor.copy()
-                supplied_vapor[methane_index] -= 0.5*methane_mass_ratio*trial_carbon.sum()
+                # Newly produced methane becomes available after this
+                # substep, when the full carbon loss is committed.
                 mid_a = radius*np.cbrt((mass+0.5*trial_carbon)/dust) if variable_radius else radius
                 trial_rates = collision*(mid_a/radius)[None, :]**2
                 trial_ml = monolayer*(mid_a[None, :]+molecular_radius[:, None])**2
             else:
-                supplied_vapor, trial_rates, trial_ml = current_vapor, rates, ml
+                trial_rates, trial_ml = rates, ml
             # Calculate the trial change in ice surface density for the current substep
-            trial = _constant_radius(h, current_ice, supplied_vapor, equilibrium, trial_rates, trial_ml)
+            trial = _constant_radius(h, current_ice, current_vapor, equilibrium, trial_rates, trial_ml)
 
             # Calculate the gross change in ice surface density for the current substep
             gross = np.abs(trial).sum(axis=0)-trial_carbon
