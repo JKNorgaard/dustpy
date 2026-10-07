@@ -202,10 +202,17 @@ subroutine m_generator(A, cStick, eps, iLF, iRM, iStick, m, phi, Rf, Rs, Sigma, 
   ce = int( -1.d0/b * log10(1.d0 - 10.d0**(-b) ) ) + 1
 
   ! init outputs
-  MF(:,:,:) = 0.d0
+  MF(1,:,:) = 0.d0
+  MF(Nr,:,:) = 0.d0
 
   ! Loop over interior radii only
+  ! FIXME: Needs to be compiled with -fopenmp
+  ! FIXME: Environment variable OMP_NUM_THREADS has to be set to something reasonable
+  !$omp parallel do private(ir,imax,i,jmax,j,D,F,l,k,ratef)
   do ir = 2, Nr-1
+    ! init outputs
+    MF(ir,:,:) = 0.d0
+
     ! Largest mass bin above floor
     imax = min( maxloc(m(:), 1, Sigma(ir, :) > SigmaFloor(ir, :)), Nm )
 
