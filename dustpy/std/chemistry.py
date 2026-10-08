@@ -1,4 +1,5 @@
 import numpy as np
+from numba import njit
 import astropy.constants as ac
 from dustpy import constants as c  # unused here, kept as in your original
 
@@ -72,109 +73,75 @@ def volatile_quantities(sim, volatile_name):
     # Return the calculated quantities
     return Sigma_ML, Sigma_eq_vap, v_therm
 
+@njit(cache=True, error_model="numpy")
 def _constant_radius(dt, ice, vapor, equilibrium, collision, monolayer):
-    """Analytic phase exchange for one radial bin at fixed grain radius, with depletion substepping.
+    """Analytic phase exchange at fixed grain radius, with depletion substepping.
 
     Arrays have shape (species, bins), except vapor/equilibrium (species,).
+    Compiled on first use; subsequent calls reuse the cached Numba kernel.
     """
-
-    # Initialize bookkeeping array for change in ice surface density
     change = np.zeros_like(ice)
+    nbins = ice.shape[1]
+    # Reuse scratch storage across species and substeps. Keep IEEE arithmetic
+    # (no fastmath): depletion decisions depend on small residual capacities.
+    active = np.empty(nbins, dtype=np.bool_)
+    weights = np.empty(nbins, dtype=np.float64)
+    capacity = np.empty(nbins, dtype=np.float64)
+    required = np.empty(nbins, dtype=np.float64)
 
-    # Loop over each species 
     for x in range(len(vapor)):
-
-        # Calculate the deficit of the current species
-        deficit = float(vapor[x]-equilibrium[x])
+        deficit = float(vapor[x] - equilibrium[x])
         if deficit == 0.0:
             continue
-
-        # Cache row views once per species; change_x updates change in place.
-        ice_x = ice[x]
-        collision_x = collision[x]
-        monolayer_x = monolayer[x]
-        change_x = change[x]
-
-        # Determine if the species is condensing or sublimating
         condensing = deficit > 0.0
-
-        # Only consider bins that have positive collision rates
-        active = collision_x > 0.0
-
-        # For sublimation, only consider non-bare bins
-        if not condensing:
-            active &= ice_x > monolayer_x
-
-        # Initialize the remaining time for the current timestep
+        for j in range(nbins):
+            active[j] = collision[x, j] > 0.0 and (
+                condensing or ice[x, j] > monolayer[x, j])
         remaining = float(dt)
 
-        # Loop over substeps with a maximum of ice.shape[1]+1 iterations to ensure convergence
-        for _ in range(ice.shape[1]+1):
-
-            # Calculate the summed collision rates for the active bins
-            rates = np.where(active, collision_x, 0.0)
-            total = rates.sum()
-
-            # If there are no active bins or no remaining time, break the loop
+        for _ in range(nbins + 1):
+            total = 0.0
+            changed = 0.0
+            for j in range(nbins):
+                if active[j]:
+                    total += collision[x, j]
+                changed += change[x, j]
             if total == 0.0 or remaining <= 0.0:
                 break
-
-
-            weights = rates/total
-
-            # Calculate the mass available for sublimation or condensation
-            available = max(0.0, np.sign(deficit)*(deficit-change_x.sum()))
+            available = max(0.0, np.sign(deficit) * (deficit - changed))
             if available == 0.0:
                 break
 
-            # Calculate the time until the next event (a bin becomes bare) for sublimation
+            first_required = np.inf
+            for j in range(nbins):
+                weights[j] = collision[x, j] / total if active[j] else 0.0
+                if not condensing:
+                    capacity[j] = max(ice[x, j] + change[x, j] - monolayer[x, j], 0.0)
+                    required[j] = capacity[j] / weights[j] if active[j] else np.inf
+                    first_required = min(first_required, required[j])
+
             event_time = np.inf
             if not condensing:
-                # Calculate the remaining ice capacity for sublimation
-                capacity = np.maximum(ice_x+change_x-monolayer_x, 0.0)
-
-                # Calculate the total sublimation across all bins required for making each bin bare
-                required = np.divide(capacity, weights, out=np.full_like(weights, np.inf), where=active)
-
-                # The lowest required sublimation determines the bin which will become bare first
-                first = int(np.argmin(required))
-
-                # Calculate the fraction of the vapor deficit that is used for sublimation in this substep
-                fraction = required[first]/available
-
-                # If the fraction is less than 1, a bin becomes bare and the time until that happens is calculated
+                fraction = first_required / available
                 if fraction < 1.0:
-                    event_time = -np.log1p(-fraction)/total
+                    event_time = -np.log1p(-fraction) / total
 
-            # If the remaining time is less than the event time, the full remaining interval is integrated
             step = min(remaining, event_time)
+            transferred = available * (-np.expm1(-total * step))
+            for j in range(nbins):
+                delta = weights[j] * transferred
+                if not condensing:
+                    delta = -min(delta, capacity[j])
+                change[x, j] += delta
 
-            # Calculate the transferred mass for this substep
-            with np.errstate(over='ignore'):
-                transferred = available*(-np.expm1(-total*step))
-
-            # The transferred mass is distributed among the mass bins
-            delta = weights*transferred
-
-            # For sublimation, ensure that the change in ice surface density does not exceed the available ice
-            if not condensing:
-                delta = -np.minimum(delta, capacity)
-
-            # Update the change in ice surface density for the current species
-            change_x += delta
-
-            # Check if the substep is the last one
             finished = step == remaining
-
-            # Update the remaining time for the current timestep
-            remaining = max(0.0, remaining-step)
+            remaining = max(0.0, remaining - step)
             if finished:
-                # The full remaining interval has been integrated.
                 break
-
-            # Remove every bin with the same depletion threshold. 
             if event_time <= step:
-                active &= required > required[first]
+                # Remove all bins tied at the first depletion threshold.
+                for j in range(nbins):
+                    active[j] = active[j] and required[j] > first_required
             else:
                 break
     return change
@@ -536,124 +503,58 @@ def remapper(sim, include_carbon=False):
         Remapped carbon surface density (Nr, Nm), when include_carbon=True.
     """
 
-    volatiles_names = sim.volatiles.names
-    n_volatiles = len(volatiles_names)
     has_carbon = hasattr(sim, 'refractory_carbon')
     if has_carbon and not include_carbon:
         raise ValueError('Use include_carbon=True when remapping carbon-bearing grains.')
 
-    # Current dust distribution
-    dust = np.copy(sim.dust.Sigma)
-
-    # Ice distributions for all species
-    # Shape: (Nvolatiles, Nr, Nm)
-    ice = np.stack([
-        np.copy(getattr(sim.volatiles, volatile_name).Sigmaice)
-        for volatile_name in volatiles_names
-    ])
+    # Only the stacked tracer array needs a copy; the kernel never mutates inputs.
+    dust = np.asarray(sim.dust.Sigma)
+    tracers = [np.asarray(getattr(sim.volatiles, name).Sigmaice)
+               for name in sim.volatiles.names]
     if has_carbon:
-        ice = np.concatenate([ice, np.asarray(sim.refractory_carbon.Sigma)[None]])
-        n_volatiles += 1
-
-    # Total change in grain mass due to all volatile chemistry
-    # Shape: (Nr, Nm)
-    ice_delta_total = np.array(sim.dust.Sigma.chemdelta, copy=True)
-
-    # Bookkeeping arrays
-    dust_new = np.zeros_like(dust)
-    ice_new = np.zeros_like(ice)
-
-    # Preserve inner radial cell since this is set by the boundary condition
-    dust_new[0] = dust[0]
-    ice_new[:, 0, :] = ice[:, 0, :]
-
-    # Constants
-    B = float(sim.grid.B)
-    log_B = np.log(B)
-    n_r, n_sigma = dust.shape
-    denom = 1.0 / (B - 1.0)
-
-    # Apply Podolak remapping independently at each radius
-    for r in range(1, n_r):
-
-        dust_r = dust[r, :]
-        ice_r = ice[:, r, :]
-        ice_delta_r = ice_delta_total[r, :]
-
-        # Total fractional change in grain mass caused by chemistry
-        delta_frac_dust = (dust_r + ice_delta_r) / dust_r
-
-        # Dust surface density after chemistry
-        dust_chemistry = dust_r * delta_frac_dust
-
-        # Number of mass-grid cells by which the grains move
-        k = np.log(delta_frac_dust) / log_B
-
-        # Left destination cell
-        i = np.floor(k).astype(int)
-
-        # Fractional displacement between the two destination cells
-        delta = k - i
-
-        # Weighting factors for the left and right destination cells
-        B_delta_term = B**(1.0 - delta)
-
-        weight_minus = (B_delta_term - 1.0) * denom
-        weight_plus = (B - B_delta_term) * denom
-
-        # Dust distributed between neighboring mass bins
-        sigma_minus = dust_chemistry * weight_minus
-        sigma_plus = dust_chemistry * weight_plus
-
-        # Every volatile species follows the same grain displacement
-        ice_minus = ice_r * weight_minus[None, :]
-        ice_plus = ice_r * weight_plus[None, :]
-
-        # Destination indices
-        new_idxL = np.arange(n_sigma) + i
-        new_idxR = new_idxL + 1
-
-        valid_maskL = (new_idxL >= 0) & (new_idxL < n_sigma)
-        valid_maskR = (new_idxR >= 0) & (new_idxR < n_sigma)
-
-        valid_idxL = new_idxL[valid_maskL]
-        valid_idxR = new_idxR[valid_maskR]
-
-        #################################################
-        ################ Dust remapping #################
-
-        dust_r_new = np.zeros_like(dust_r)
-
-        np.add.at(dust_r_new, valid_idxL, sigma_minus[valid_maskL])
-
-        np.add.at(dust_r_new, valid_idxR, sigma_plus[valid_maskR])
-
-        # Material moving outside the grid is placed in the edge bins
-        dust_r_new[0] += (sigma_minus[new_idxL < 0].sum() + sigma_plus[new_idxR < 0].sum())
-
-        dust_r_new[-1] += (sigma_minus[new_idxL >= n_sigma].sum() + sigma_plus[new_idxR >= n_sigma].sum())
-
-        ###################################################
-        ################### Ice remapping #################
-
-
-        ice_r_new = np.zeros_like(ice_r)
-
-        for j in range(n_volatiles):
-
-            np.add.at(ice_r_new[j], valid_idxL, ice_minus[j, valid_maskL])
-
-            np.add.at(ice_r_new[j],valid_idxR, ice_plus[j, valid_maskR])
-
-            # Material moving outside the grid is placed in the edge bins
-            ice_r_new[j, 0] += (ice_minus[j, new_idxL < 0].sum() + ice_plus[j, new_idxR < 0].sum())
-
-            ice_r_new[j, -1] += (ice_minus[j, new_idxL >= n_sigma].sum() + ice_plus[j, new_idxR >= n_sigma].sum())
-
-        dust_new[r, :] = dust_r_new
-        ice_new[:, r, :] = ice_r_new
+        tracers.append(np.asarray(sim.refractory_carbon.Sigma))
+    dust_new, ice_new = _remap_arrays(
+        dust, np.stack(tracers), np.asarray(sim.dust.Sigma.chemdelta),
+        float(sim.grid.B))
 
     if include_carbon:
         return dust_new, ice_new[:-1] if has_carbon else ice_new, (
             ice_new[-1] if has_carbon else np.zeros_like(dust))
+    return dust_new, ice_new
+
+
+@njit(cache=True, error_model="numpy")
+def _remap_arrays(dust, ice, ice_delta_total, B):
+    """Redistribute positive grain masses on a logarithmic mass grid.
+
+    Dust and chemistry deltas have shape (Nr, Nm); tracers (Ns, Nr, Nm).
+    Inputs are read-only. Out-of-grid destinations accumulate in edge bins.
+    """
+    dust_new = np.zeros_like(dust)
+    ice_new = np.zeros_like(ice)
+    dust_new[0] = dust[0]
+    ice_new[:, 0, :] = ice[:, 0, :]
+    log_B = np.log(B)
+    denom = 1.0 / (B - 1.0)
+    nr, nm = dust.shape
+
+    for r in range(1, nr):
+        for j in range(nm):
+            ratio = (dust[r, j] + ice_delta_total[r, j]) / dust[r, j]
+            mass = dust[r, j] * ratio
+            displacement = np.log(ratio) / log_B
+            offset = int(np.floor(displacement))
+            fraction = displacement - offset
+            power = B ** (1.0 - fraction)
+            weight_left = (power - 1.0) * denom
+            weight_right = (B - power) * denom
+            left = min(max(j + offset, 0), nm - 1)
+            right = min(max(j + offset + 1, 0), nm - 1)
+
+            # Direct scatter replaces per-row masks, temporaries and np.add.at.
+            dust_new[r, left] += mass * weight_left
+            dust_new[r, right] += mass * weight_right
+            for x in range(ice.shape[0]):
+                ice_new[x, r, left] += ice[x, r, j] * weight_left
+                ice_new[x, r, right] += ice[x, r, j] * weight_right
     return dust_new, ice_new

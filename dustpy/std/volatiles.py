@@ -49,6 +49,38 @@ def finalize_volatiles(sim):
 
     chemistry_updater(sim)
     remap_updater(sim)
+    refresh_after_chemistry(sim)
+
+def refresh_after_chemistry(sim):
+    """Refresh coefficients and interior sources once, in dependency order.
+
+    Uses the current fixed material properties, mixing parameters, molecular
+    mass, alpha, fragmentation threshold, backreaction, torque and external
+    sources. Evolving prescriptions for these require extending this order.
+    """
+
+    gas, dust = sim.gas, sim.dust
+
+
+    def update_preserving_boundaries(field):
+        boundary = field[[0, -1]].copy()
+        try:
+            field.update()
+        finally:
+            field[[0, -1]] = boundary
+
+    gas.update()
+    dust.update()
+
+    # Flux divergence supplies the hydrodynamic sources used by the timestep.
+    update_preserving_boundaries(gas.Fi)
+    for name in ("adv", "diff", "tot"):
+        update_preserving_boundaries(getattr(dust.Fi, name))
+    update_preserving_boundaries(gas.S.hyd)
+    update_preserving_boundaries(dust.S.hyd)
+    update_preserving_boundaries(dust.S.coag)
+    update_preserving_boundaries(gas.S.tot)
+    update_preserving_boundaries(dust.S.tot)
 
 
 def remap_updater(sim):

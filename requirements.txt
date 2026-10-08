@@ -1,6 +1,7 @@
 ipympl
 matplotlib
 numpy
+numba
 requests
 simframe>=1.0.6
 .

@@ -40,7 +40,7 @@ classifiers = [
   "Topic :: Scientific/Engineering",
   "Topic :: Scientific/Engineering :: Physics",
 ]
-dependencies = ["matplotlib", "numpy", "requests", "simframe>=1.0.6"]
+dependencies = ["matplotlib", "numpy", "numba", "requests", "simframe>=1.0.6"]
 
 [project.urls]
 Repository = "https://github.com/stammler/dustpy/"
