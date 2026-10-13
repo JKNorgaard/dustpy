@@ -1,4 +1,5 @@
-subroutine jacobian_coagulation_generator(A, cStick, eps, iLF, iRM, iStick, m, phi, Rf, Rs, Sigma, SigmaFloor, alphaIce, dat, row, col, Nr, Nm)
+subroutine jacobian_coagulation_generator(A, cStick, eps, iLF, iRM, iStick, m, phi, Rf, Rs, &
+                                          Sigma, SigmaFloor, alphaIce, dat, row, col, Nr, Nm)
   ! Ice coagulation Jacobian at interior radii (2..Nr-1). Fortran indexing.
 
   use math, only: kdelta
