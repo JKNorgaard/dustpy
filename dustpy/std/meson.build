@@ -14,6 +14,8 @@ python_sources = [
 
 py3.install_sources(python_sources, subdir: 'dustpy/std')
 
+omp_dep = dependency('openmp', language: 'fortran')
+
 dust_fortran_sources = [
   '../constants/constants.f90',
   '../utils/math.f90',
@@ -68,10 +70,18 @@ ice_source = custom_target('ice_fmodule.c',
   command: [py3, '-m', 'numpy.f2py', '--lower', '-m', 'ice_f', '@INPUT@', '--build-dir', 'dustpy/std']
   )
 
+# Keep OpenMP compile flags on Fortran sources, away from the C wrappers.
+ice_fortran_lib = static_library('ice_fortran',
+  ice_fortran_sources,
+  dependencies: omp_dep,
+  pic: true)
+
 py3.extension_module('ice_f',
-  ice_fortran_sources+ice_source,
+  ice_source,
   incdir_f2py / 'fortranobject.c',
   include_directories: inc_np,
-  dependencies: py_dep,
+  dependencies: [py_dep, omp_dep.partial_dependency(link_args: true, links: true)],
+  link_with: ice_fortran_lib,
+  link_language: 'fortran',
   install: true,
   subdir: 'dustpy/std')

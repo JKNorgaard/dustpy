@@ -207,6 +207,11 @@ def rhs_boundary(sim, field):
             field._rhs[-Nm:] = 0.
 
 
+# Accumulated wall-clock seconds across all assemble_rhs calls and ice species.
+# Clear this dictionary before each benchmark to reset the counters.
+assemble_rhs_timings = {}
+
+
 def assemble_rhs(sim, field):
     """
     Assembles the RHS = Σ_ice^i + (M * Σ_dust^(t+Δt) / m) * Δt for ice specie
@@ -219,13 +224,22 @@ def assemble_rhs(sim, field):
     Returns
     -------
     rhs : Right hand side of the matrix equation for ice specie
+
+    Notes
+    -----
+    Wall-clock timings accumulate in ``assemble_rhs_timings``. The
+    ``calls`` entry counts completed calls; all other entries are seconds.
+    The total excludes the counter bookkeeping and includes timer overhead.
     """
 
-     # Time step size
+    t0 = time.perf_counter()
+
+    # Time step size
     dt = sim.t.prevstepsize
 
     # Define the first term of the RHS
     rhs1 = field.copy().ravel()
+    t1 = time.perf_counter()
 
     # Required quantities are defined
     Nr, Nm      = sim.grid.Nr, sim.grid.Nm
@@ -244,12 +258,19 @@ def assemble_rhs(sim, field):
     Sigma_ice   = np.asarray(field)
     SigmaFloor  = sim.dust.SigmaFloor
     Xi          = sim.dust.coagulation.Xi_ice
+    t2 = time.perf_counter()
 
     # M matrix is calculated
     M = ice_f.m_generator(A, cStick, eps, iLF, iRM, iStick, m, phi, Rf, Rs, Sigma_dust, Sigma_ice, SigmaFloor, Xi, Nr, Nm)
+    t3 = time.perf_counter()
 
     # Calculate second term of RHS
-    rhs2 = (np.einsum('rkj,rj->rk', M, sim.dust.Sigma/sim.grid.m[None, :]) * dt).ravel()
+    dust_number = sim.dust.Sigma/sim.grid.m[None, :]
+    t4 = time.perf_counter()
+    rhs2 = np.einsum('rkj,rj->rk', M, dust_number)
+    t5 = time.perf_counter()
+    rhs2 = (rhs2 * dt).ravel()
+    t6 = time.perf_counter()
 
     # Assemble total RHS
     # Load RHS boundary conditions
@@ -257,6 +278,21 @@ def assemble_rhs(sim, field):
 
     # Add the two RHS terms to the interior
     rhs[Nm:-Nm] += rhs1[Nm:-Nm] + rhs2[Nm:-Nm]
+    t7 = time.perf_counter()
+
+    timings = assemble_rhs_timings
+    timings['calls'] = timings.get('calls', 0) + 1
+    for name, elapsed in (
+        ('rhs1_copy', t1 - t0),
+        ('prepare_inputs', t2 - t1),
+        ('m_generator', t3 - t2),
+        ('dust_number', t4 - t3),
+        ('einsum', t5 - t4),
+        ('scale_and_flatten', t6 - t5),
+        ('assemble_total', t7 - t6),
+        ('total', t7 - t0),
+    ):
+        timings[name] = timings.get(name, 0.0) + elapsed
     return rhs 
 
 def _get_ice_solver(sim):
