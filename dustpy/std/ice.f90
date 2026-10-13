@@ -206,8 +206,7 @@ subroutine m_generator(A, cStick, eps, iLF, iRM, iStick, m, phi, Rf, Rs, Sigma, 
   MF(Nr,:,:) = 0.d0
 
   ! Loop over interior radii only
-  ! FIXME: Needs to be compiled with -fopenmp
-  ! FIXME: Environment variable OMP_NUM_THREADS has to be set to something reasonable
+
   !$omp parallel do private(ir,imax,i,jmax,j,D,F,l,k,ratef)
   do ir = 2, Nr-1
     ! init outputs
