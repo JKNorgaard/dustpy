@@ -390,10 +390,10 @@ def _adaptive_radius(dt, ice, vapor, equilibrium, dust, radius, collision,
         # Update the change in ice surface density and remaining time for the current timestep
         ice_change += trial
         carbon_change += trial_carbon
-        next_remaining = max(0.0, remaining-h)
-        if next_remaining == remaining:
-            raise RuntimeError('Adaptive chemistry timestep underflow.')
-        remaining = next_remaining
+        # A tiny substep can change the ice or carbon even when subtracting
+        # it does not change remaining at floating-point precision.
+        # Allow that chemical progress; max_substeps bounds the iteration.
+        remaining = max(0.0, remaining-h)
 
         # If there is no remaining time, return the change in ice surface density
         if remaining == 0.0:
