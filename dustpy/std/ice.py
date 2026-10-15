@@ -32,6 +32,7 @@ def initialize_ice(sim, field):
     boundary(field)                  # Boundary conditions are enforced
     enforce_floor_value(field)       # Floor values are enforced
 
+
 def set_initial_boundary(sim, field):
     """Function sets the initial boundary condition of ice specie surface density.
     Uses the same conditions as dust.
@@ -56,6 +57,7 @@ def set_initial_boundary(sim, field):
         condition="val",
         value=0.1*field.SigmaFloor[-1] 
     )
+
 
 def boundary(field):
     """Function sets the boundary condition for ice surface density
@@ -90,6 +92,7 @@ def enforce_floor_value(field):
         field,
         0.1*field.SigmaFloor)
 
+
 def finalize_implicit(field):
     """
     Function finalizes implicit integration step
@@ -101,6 +104,7 @@ def finalize_implicit(field):
     """
     boundary(field)
     enforce_floor_value(field)
+
 
 def build_J_coag(sim):
     """
@@ -140,6 +144,7 @@ def build_J_coag(sim):
     J_coag = sp.csc_matrix((dat, (row, col)), shape=(Ntot, Ntot))
 
     return J_coag
+
 
 def rhs_boundary(sim, field):
     """
@@ -302,20 +307,12 @@ def _get_ice_solver(sim):
         dt = float(sim.t.prevstepsize)
 
         J_coag = build_J_coag(sim)
-        J_ice = (
-            sim.dust._J_hyd
-            + J_coag
-            + sim.dust._J_boundary
-        )
+        J_ice = (sim.dust._J_hyd + J_coag + sim.dust._J_boundary)
 
         A = sp.identity(J_ice.shape[0], format="csc") - dt * J_ice
 
-        solver = sp.linalg.splu(
-            A,
-            permc_spec="MMD_AT_PLUS_A",
-            diag_pivot_thresh=0.0,
-            options=dict(SymmetricMode=True),
-        )
+        solver = sp.linalg.splu(A, permc_spec="MMD_AT_PLUS_A", diag_pivot_thresh=0.0, options=dict(SymmetricMode=True))
+        
         sim.dust._ice_lu = solver
 
     return solver

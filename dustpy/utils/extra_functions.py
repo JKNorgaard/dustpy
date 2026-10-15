@@ -83,15 +83,13 @@ def add_viscous_heating(sim, a_cut=3.e-4):
 
     T_irr = np.array(sim.gas.T, copy=True)
 
-
     def temperature_updater(sim):
-        from dustpy import std
 
         r = np.asarray(sim.grid.r)
         Sigma_g = np.asarray(sim.gas.Sigma)
 
         # Calculate radii directly: dust.a is refreshed after gas.T.
-        small = (std.dust.a(sim) <= a_cut)
+        small = (sim.dust.a <= a_cut)
         populated = sim.dust.Sigma > sim.dust.SigmaFloor
         Sigma_small = np.where(small & populated, sim.dust.Sigma, 0.).sum(axis=-1)
         abundance = np.divide(
@@ -103,7 +101,7 @@ def add_viscous_heating(sim, a_cut=3.e-4):
             sigma_g=Sigma_g,
             tirr=T_irr,
             T=np.array(sim.gas.T, copy=True),
-            omega_k=np.sqrt(c.G * float(sim.star.M) / r**3),
+            omega_k=sim.grid.OmegaK,
             alpha=np.asarray(sim.gas.alpha),
             Z=abundance,
             mu=np.asarray(sim.gas.mu) / c.m_p,
