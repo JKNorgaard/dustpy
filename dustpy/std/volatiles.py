@@ -337,9 +337,26 @@ def refresh_after_chemistry(sim):
     """
     gas, dust = sim.gas, sim.dust
 
-    dust.update()
-    gas.update()
+    # Passive irradiation is unchanged, but viscous heating can respond to
+    # the new gas and small-grain abundances. Refresh thermal dependencies
+    # only if the temperature actually changes.
+    temperature = gas.T.copy()
+    gas.T.update()
+    if not np.array_equal(gas.T, temperature):
+        for field in (gas.cs, gas.Hp, gas.nu, dust.v.rel.brown):
+            field.update()
 
+    for field in (gas.rho, gas.n, gas.mfp, gas.P, gas.eta,
+                  dust.St, dust.H, dust.rho, dust.eps):
+        field.update()
+
+    gas.v.update()
+    dust.v.driftmax.update()
+    dust.v.rad.update()
+    dust.v.rel.update()
+
+    # Preserve the completed transport step's boundary fluxes and sources.
+    # Restore each flux before taking its divergence in the next update.
     for field in (gas.Fi, dust.Fi.adv, dust.Fi.diff, dust.Fi.tot,
                   gas.S.hyd, dust.S.hyd, dust.S.coag, gas.S.tot, dust.S.tot):
         update_preserving_boundaries(field)
