@@ -329,36 +329,17 @@ def update_preserving_boundaries(field):
         field[[0, -1]] = boundary
 
 def refresh_after_chemistry(sim):
-    """Update dust and gas properties that are changed by the chemistry and remapping steps.
-       Flux and source term boundaries are already set in the transport step, these are not changed."""
+    """Refresh dependencies of the gas and dust surface densities after remapping.
 
+    Mass-bin radii, material properties, mixing parameters, fragmentation
+    thresholds and external sources are fixed here. Custom chemistry-dependent
+    prescriptions for those quantities must extend this update order.
+    """
     gas, dust = sim.gas, sim.dust
-    protected = [gas.Fi, dust.Fi.adv, dust.Fi.diff, dust.Fi.tot,
-                 gas.S.hyd, gas.S.tot, dust.S.hyd, dust.S.coag, dust.S.tot]
-    boundaries = [field[[0, -1]].copy() for field in protected]
-    try:
-        gas.update()
-        # Follow the standard dust dependencies explicitly so kernels are
-        # evaluated once, after both radial velocities have been refreshed.
-        dust.updater.systole.update(sim)
-        for name in ('delta', 'rhos', 'fill', 'a', 'St', 'H', 'rho', 'eps', 'backreaction'):
-            getattr(dust, name).update()
-        gas.v.update()
-        dust.v.updater.systole.update(sim)
-        for name in ('frag', 'driftmax', 'rad', 'rel'):
-            getattr(dust.v, name).update()
-        dust.v.updater.diastole.update(sim)
-        for name in ('D', 'kernel', 'p'):
-            getattr(dust, name).update()
-        dust.S.ext.update()
 
-        # Keep transport-step boundary diagnostics while refreshing interiors.
-        for field in (gas.Fi, dust.Fi.adv, dust.Fi.diff, dust.Fi.tot,
-                      gas.S.hyd, dust.S.hyd, dust.S.coag, gas.S.tot, dust.S.tot):
-            update_preserving_boundaries(field)
-        dust.updater.diastole.update(sim)
-    finally:
-        # gas.update() can itself update source fields; preserve their original
-        # boundaries too, not just those seen by the explicit refresh above.
-        for field, boundary in zip(protected, boundaries):
-            field[[0, -1]] = boundary
+    dust.update()
+    gas.update()
+
+    for field in (gas.Fi, dust.Fi.adv, dust.Fi.diff, dust.Fi.tot,
+                  gas.S.hyd, dust.S.hyd, dust.S.coag, gas.S.tot, dust.S.tot):
+        update_preserving_boundaries(field)
