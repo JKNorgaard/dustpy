@@ -246,36 +246,23 @@ def assemble_rhs(sim, field):
     rhs1 = field.copy().ravel()
     t1 = time.perf_counter()
 
-    # Required quantities are defined
-    Nr, Nm      = sim.grid.Nr, sim.grid.Nm
-    dt          = sim.t.prevstepsize
-    m           = sim.grid.m
-    A           = sim.dust.coagulation.A
-    cStick      = sim.dust.coagulation.stick_ice
-    eps         = sim.dust.coagulation.eps
-    iRM         = sim.dust.coagulation.rm_ind
-    iLF         = sim.dust.coagulation.lf_ind
-    iStick      = sim.dust.coagulation.stick_ind_ice
-    phi         = sim.dust.coagulation.phi
-    Rf          = sim.dust._ice_Rf
-    Rs          = sim.dust._ice_Rs
-    Sigma_dust  = np.asarray(sim.dust._sigmaOld)
-    Sigma_ice   = np.asarray(field)
-    SigmaFloor  = sim.dust.SigmaFloor
-    Xi          = sim.dust.coagulation.Xi_ice
+    # Old dust sets the active collision bins; updated dust weights the RHS.
+    Nr, Nm = sim.grid.Nr, sim.grid.Nm
+    coag = sim.dust.coagulation
+    Sigma_dust = np.asarray(sim.dust._sigmaOld)
+    Sigma_ice = np.asarray(field)
     t2 = time.perf_counter()
 
-    # M matrix is calculated
-    M = ice_f.m_generator(A, cStick, eps, iLF, iRM, iStick, m, phi, Rf, Rs, Sigma_dust, Sigma_ice, SigmaFloor, Xi, Nr, Nm)
+    dust_number = sim.dust.Sigma / sim.grid.m[None, :]
     t3 = time.perf_counter()
-
-    # Calculate second term of RHS
-    dust_number = sim.dust.Sigma/sim.grid.m[None, :]
+    rhs2 = ice_f.rhs_generator(
+        coag.stick_ice, coag.lf_ind, coag.stick_ind_ice,
+        sim.grid.m, coag.phi, sim.dust._ice_Rf, sim.dust._ice_Rs,
+        Sigma_dust, Sigma_ice, sim.dust.SigmaFloor, dust_number, Nr, Nm,
+    )
     t4 = time.perf_counter()
-    rhs2 = np.einsum('rkj,rj->rk', M, dust_number)
-    t5 = time.perf_counter()
     rhs2 = (rhs2 * dt).ravel()
-    t6 = time.perf_counter()
+    t5 = time.perf_counter()
 
     # Assemble total RHS
     # Load RHS boundary conditions
@@ -283,19 +270,18 @@ def assemble_rhs(sim, field):
 
     # Add the two RHS terms to the interior
     rhs[Nm:-Nm] += rhs1[Nm:-Nm] + rhs2[Nm:-Nm]
-    t7 = time.perf_counter()
+    t6 = time.perf_counter()
 
     timings = assemble_rhs_timings
     timings['calls'] = timings.get('calls', 0) + 1
     for name, elapsed in (
         ('rhs1_copy', t1 - t0),
         ('prepare_inputs', t2 - t1),
-        ('m_generator', t3 - t2),
-        ('dust_number', t4 - t3),
-        ('einsum', t5 - t4),
-        ('scale_and_flatten', t6 - t5),
-        ('assemble_total', t7 - t6),
-        ('total', t7 - t0),
+        ('dust_number', t3 - t2),
+        ('rhs_generator', t4 - t3),
+        ('scale_and_flatten', t5 - t4),
+        ('assemble_total', t6 - t5),
+        ('total', t6 - t0),
     ):
         timings[name] = timings.get(name, 0.0) + elapsed
     return rhs 

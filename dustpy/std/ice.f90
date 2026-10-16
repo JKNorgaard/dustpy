@@ -267,6 +267,110 @@ subroutine m_generator(A, cStick, eps, iLF, iRM, iStick, m, phi, Rf, Rs, Sigma, 
 
 end subroutine m_generator
 
+subroutine rhs_generator(cStick, iLF, iStick, m, phi, Rf, Rs, Sigma, Sigma_Ice, SigmaFloor, dust_number, rhs, Nr, Nm)
+  ! Compute M @ dust_number directly, without allocating the coupling matrix.
+  ! Sigma is the old dust density; dust_number is the updated dust number density.
+
+  implicit none
+
+  ! ---------- Arguments ----------
+  integer,          intent(in)  :: Nr, Nm
+  double precision, intent(in)  :: cStick(4, Nm, Nm)
+  integer,          intent(in)  :: iLF(Nm, Nm)        ! python indexing
+  integer,          intent(in)  :: iStick(4, Nm, Nm)
+  double precision, intent(in)  :: m(Nm)
+  double precision, intent(in)  :: phi(Nm, Nm)
+  double precision, intent(in)  :: Rf(Nr, Nm, Nm)
+  double precision, intent(in)  :: Rs(Nr, Nm, Nm)
+  double precision, intent(in)  :: Sigma(Nr, Nm)
+  double precision, intent(in)  :: Sigma_Ice(Nr, Nm)
+  double precision, intent(in)  :: SigmaFloor(Nr, Nm)
+
+  double precision, intent(in)  :: dust_number(Nr, Nm)
+  double precision, intent(out) :: rhs(Nr, Nm)
+
+  ! ---------- Locals ----------
+  double precision :: ratef, ni
+  integer          :: ir, i, j, k, l, imax, jmax
+  double precision :: b, ce
+  double precision :: D, F
+
+  ! b is defined as
+  ! m(i+1) = m(i) * 10**b
+  b = log10(m(1)/m(Nm) ) / (1.d0 - Nm)
+
+  ! ce from Brauer et al. (2008) equation (A.6):
+  ! m(k-1) + m(i) < m(k) for any i with i <= k - ce
+  ce = int( -1.d0/b * log10(1.d0 - 10.d0**(-b) ) ) + 1
+
+  ! init outputs
+  rhs(1,:) = 0.d0
+  rhs(Nr,:) = 0.d0
+
+  ! Loop over interior radii only
+
+  !$omp parallel do private(ir,imax,i,jmax,j,D,F,l,k,ratef,ni)
+  do ir = 2, Nr-1
+    ! init outputs
+    rhs(ir,:) = 0.d0
+
+    ! Largest mass bin above floor
+    imax = min( maxloc(m(:), 1, Sigma(ir, :) > SigmaFloor(ir, :)), Nm )
+
+    do i = 1, imax
+      ni = dust_number(ir, i)
+      jmax = MIN(Nm-1, INT(LOG10(10.d0**(b*Nm)-10.d0**(b*i))/b))
+      do j = 1, i
+
+        ! ==========================================================
+        !                       STICKING
+        ! ==========================================================
+        if (Rs(ir, j, i) > 0.d0) then
+
+          ! Calculate D and F terms
+          if (i <= j+1 - ce) then
+            D = - m(j+1) * m(i) / ((m(j+1)-m(j))*(m(j)+m(i)))
+          else
+            D = -1.d0
+          end if
+          if (j <= i+1 - ce) then
+            F = m(i) * (m(i+1)-(m(i)+m(j))) / ((m(i+1)-m(i))*(m(i)+m(j)))
+          else
+            F = 0.d0
+          end if
+
+          ! Loop through collision products
+          do l=1,4
+            k = iStick(l, j, i) + 1
+            if (k .eq. 0) cycle
+            rhs(ir, k) = rhs(ir, k) + cStick(l, j, i) * m(k) * Rs(ir, j, i) * Sigma_ice(ir, j) / (m(i) + m(j)) * ni
+          end do
+
+          if (j<=jmax) then
+            ! Add D and F terms
+            rhs(ir, j) = rhs(ir, j) + Rs(ir, j, i) * Sigma_ice(ir, j) * D * ni
+            rhs(ir, i) = rhs(ir, i) + Rs(ir, i, j) * Sigma_ice(ir, j) * F * ni
+          end if
+        end if ! sticking
+
+        ! ==========================================================
+        !                FRAGMENTATION / EROSION
+        ! ==========================================================
+
+        if (Rf(ir, j, i) .GT. 0.d0) then
+          ratef = Rf(ir, j, i) * Sigma_ice(ir, j) * ni
+          ! Fragments distribution
+          rhs(ir, :) = rhs(ir, :) + ratef * phi(ilf(j, i)+1, :)
+          rhs(ir, j) = rhs(ir, j) - ratef
+        end if ! fragmentation/erosion
+      end do ! j
+    end do   ! i
+  end do     ! ir
+
+  !$omp end parallel do
+
+end subroutine rhs_generator
+
 subroutine coagulation_parameters_ice(m, cratRatio, cstick, cstick_ind, Xi, Nm)
   ! Subroutine calculates the sticking parameters needed to calculate the
   ! sticking sources for ice. The sticking matrix is calculated with the method
