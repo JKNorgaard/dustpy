@@ -76,9 +76,22 @@ def set_abundances(sim):
     sim.dust.update()
 
 
-def add_viscous_heating(sim, a_cut=3.e-4):
+def add_viscous_heating(sim, a_cut=3.e-4, update=True):
     """Add viscous heating to the gas temperature.
-    Sets the updater for the gas temperature to include viscous heating, and updates the gas and dust quantities.
+
+    Calculate the initial heated temperature and refresh gas and dust quantities.
+    By default, subsequent temperature updates recalculate viscous heating.
+
+    Parameters
+    ----------
+    sim : Simulation
+        Initialized simulation to modify.
+    a_cut : float, optional
+        Maximum grain radius contributing to the small-grain abundance [cm].
+    update : bool, optional
+        If False, disable temperature updates after the initial calculation,
+        keeping the total gas temperature (irradiation plus viscous heating)
+        fixed. Defaults to True.
     """
 
     T_irr = np.array(sim.gas.T, copy=True)
@@ -110,4 +123,6 @@ def add_viscous_heating(sim, a_cut=3.e-4):
 
     sim.gas.T.updater.updater = temperature_updater
     sim.gas.update()
+    if not update:
+        sim.gas.T.updater.updater = None
     sim.dust.update()
