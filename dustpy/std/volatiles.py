@@ -329,11 +329,7 @@ def update_preserving_boundaries(field):
         field[[0, -1]] = boundary
 
 def refresh_after_chemistry(sim):
-    """Refresh dependencies of the gas and dust surface densities after remapping.
-
-    Mass-bin radii, material properties, mixing parameters, fragmentation
-    thresholds and external sources are fixed here. Custom chemistry-dependent
-    prescriptions for those quantities must extend this update order.
+    """Refreshes the gas and dust properties that are altered by chemistry and remapping.
     """
     gas, dust = sim.gas, sim.dust
 
@@ -349,7 +345,7 @@ def refresh_after_chemistry(sim):
     for field in (gas.rho, gas.n, gas.mfp, gas.P, gas.eta,
                   dust.St, dust.H, dust.rho, dust.eps):
         field.update()
-
+    
     gas.v.update()
     dust.v.driftmax.update()
     dust.v.rad.update()
