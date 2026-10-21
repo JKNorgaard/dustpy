@@ -5,8 +5,18 @@ from dustpy import constants as c
 from chemcomp.disks._disk_class import solve_viscous_heating_globally
 
 
-def set_abundances(sim):
+def set_abundances(sim, Mdisk=None):
     """Set the initial fiducial composition from number abundances per H nucleus.
+
+    Parameters
+    ----------
+    sim : Simulation
+        Initialized simulation to modify.
+    Mdisk : float, optional
+        Total gas plus dust mass on the simulation grid, in solar masses.
+        Rescale the existing radial profile while retaining the fiducial
+        component mass fractions. If omitted, retain the existing mass.
+        Numerical surface density floors can add a negligible mass.
     """
     from dustpy import std
 
@@ -56,6 +66,21 @@ def set_abundances(sim):
     weights = np.divide(dust, dust_sum[:, None], out=np.zeros_like(dust),
                         where=dust_sum[:, None] > 0)
     total = gas + dust_sum
+    if Mdisk is not None:
+        if not np.isscalar(Mdisk) or not np.isfinite(Mdisk) or Mdisk <= 0:
+            raise ValueError("Mdisk must be a finite, positive mass in solar masses.")
+        current_mass = np.sum(total * np.asarray(sim.grid.A))
+        if not np.isfinite(current_mass) or current_mass <= 0:
+            raise ValueError("The existing disk must have a finite, positive mass.")
+        # Use the disk's grain distribution where an annulus has no dust.
+        # This preserves the composition without normalizing floor placeholders.
+        if np.any(~populated & (total > 0)):
+            grain_mass = np.sum(dust * np.asarray(sim.grid.A)[:, None], axis=0)
+            if grain_mass.sum() <= 0:
+                raise ValueError("The disk must contain populated dust bins to set abundances.")
+            weights[~populated] = grain_mass / grain_mass.sum()
+        total = total * (Mdisk * c.M_sun / current_mass)
+        populated = np.ones_like(populated, dtype=bool)
     # Unit component distribution: multiply by a disc mass fraction below.
     distribution = weights * total[:, None]
     sim.gas.Sigma[...] = np.where(populated, gas_fraction * total, gas)
