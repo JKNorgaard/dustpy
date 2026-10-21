@@ -339,7 +339,12 @@ def _adaptive_radius(dt, ice, vapor, equilibrium, dust, radius, collision,
                 out=np.full_like(mass, np.inf), where=current_carbon > 0)
             limiting = fraction < 1
             if np.any(limiting):
-                h = min(h, float(np.min(-np.log1p(-fraction[limiting])/carbon_rate)))
+                exposure = float(np.min(-np.log1p(-fraction[limiting])))
+                # Divide only when carbon loss constrains the current step.
+                # In cold annuli the rate can be so small that the implied
+                # timescale overflows, although its effect within h is tiny.
+                if exposure < float(carbon_rate) * h:
+                    h = exposure / carbon_rate
         for _ in range(100):
             # Ice exchange and carbon loss are independent at fixed geometry.
             # Carbon still affects the radii and the accepted substep size.
