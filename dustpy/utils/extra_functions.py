@@ -67,17 +67,9 @@ def set_abundances(sim, Mdisk=None):
                         where=dust_sum[:, None] > 0)
     total = gas + dust_sum
     if Mdisk is not None:
-        if not np.isscalar(Mdisk) or not np.isfinite(Mdisk) or Mdisk <= 0:
-            raise ValueError("Mdisk must be a finite, positive mass in solar masses.")
         current_mass = np.sum(total * np.asarray(sim.grid.A))
-        if not np.isfinite(current_mass) or current_mass <= 0:
-            raise ValueError("The existing disk must have a finite, positive mass.")
-        # Use the disk's grain distribution where an annulus has no dust.
-        # This preserves the composition without normalizing floor placeholders.
         if np.any(~populated & (total > 0)):
             grain_mass = np.sum(dust * np.asarray(sim.grid.A)[:, None], axis=0)
-            if grain_mass.sum() <= 0:
-                raise ValueError("The disk must contain populated dust bins to set abundances.")
             weights[~populated] = grain_mass / grain_mass.sum()
         total = total * (Mdisk * c.M_sun / current_mass)
         populated = np.ones_like(populated, dtype=bool)

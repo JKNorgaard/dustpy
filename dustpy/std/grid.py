@@ -4,7 +4,6 @@ import dustpy.constants as c
 
 import numpy as np
 
-
 def OmegaK(sim):
     """Function calculates the Keplerian frequency.
 

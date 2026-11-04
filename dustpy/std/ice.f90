@@ -270,6 +270,7 @@ end subroutine m_generator
 subroutine rhs_generator(cStick, iLF, iStick, m, phi, Rf, Rs, Sigma, Sigma_Ice, SigmaFloor, dust_number, rhs, Nr, Nm)
   ! Compute M @ dust_number directly, without allocating the coupling matrix.
   ! Sigma is the old dust density; dust_number is the updated dust number density.
+  use omp_lib
 
   implicit none
 
@@ -304,16 +305,13 @@ subroutine rhs_generator(cStick, iLF, iStick, m, phi, Rf, Rs, Sigma, Sigma_Ice, 
   ce = int( -1.d0/b * log10(1.d0 - 10.d0**(-b) ) ) + 1
 
   ! init outputs
-  rhs(1,:) = 0.d0
-  rhs(Nr,:) = 0.d0
+  rhs = 0.d0
 
   ! Loop over interior radii only
 
-  !$omp parallel do private(ir,imax,i,jmax,j,D,F,l,k,ratef,ni)
+  !$omp parallel private(ir,imax,i,jmax,j,D,F,l,k,ratef,ni)
+  !$omp do
   do ir = 2, Nr-1
-    ! init outputs
-    rhs(ir,:) = 0.d0
-
     ! Largest mass bin above floor
     imax = min( maxloc(m(:), 1, Sigma(ir, :) > SigmaFloor(ir, :)), Nm )
 
@@ -366,8 +364,8 @@ subroutine rhs_generator(cStick, iLF, iStick, m, phi, Rf, Rs, Sigma, Sigma_Ice, 
       end do ! j
     end do   ! i
   end do     ! ir
-
-  !$omp end parallel do
+  !$omp enddo nowait
+  !$omp end parallel
 
 end subroutine rhs_generator
 
