@@ -15,7 +15,9 @@ def set_abundances(sim, Mdisk=None):
     Mdisk : float, optional
         Total gas plus dust mass on the simulation grid, in solar masses.
         Rescale the existing radial profile while retaining the fiducial
-        component mass fractions. If omitted, retain the existing mass.
+        component mass fractions where dust is present. Dust-free annuli
+        remain dust-free, with their rescaled mass retained in gas.
+        If omitted, retain the existing mass.
         Numerical surface density floors can add a negligible mass.
     """
     from dustpy import std
@@ -68,14 +70,10 @@ def set_abundances(sim, Mdisk=None):
     total = gas + dust_sum
     if Mdisk is not None:
         current_mass = np.sum(total * np.asarray(sim.grid.A))
-        if np.any(~populated & (total > 0)):
-            grain_mass = np.sum(dust * np.asarray(sim.grid.A)[:, None], axis=0)
-            weights[~populated] = grain_mass / grain_mass.sum()
         total = total * (Mdisk * c.M_sun / current_mass)
-        populated = np.ones_like(populated, dtype=bool)
     # Unit component distribution: multiply by a disc mass fraction below.
     distribution = weights * total[:, None]
-    sim.gas.Sigma[...] = np.where(populated, gas_fraction * total, gas)
+    sim.gas.Sigma[...] = np.where(populated, gas_fraction * total, total)
     sim.dust.Sigma[...] = dust_fraction * distribution
     std.dust.enforce_floor_value(sim)
     for name in volatile_names:
