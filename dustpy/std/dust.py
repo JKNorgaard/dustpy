@@ -4,6 +4,7 @@ import dustpy.constants as c
 from dustpy.std import dust_f
 
 import numpy as np
+from numba import njit, prange
 import scipy.sparse as sp
 
 from simframe.integration import Scheme
@@ -294,6 +295,87 @@ def H(sim):
     return dust_f.h_dubrulle1995(sim.gas.Hp, sim.dust.St, sim.dust.delta.vert)
 
 
+@njit(cache=True, parallel=True)
+def jacobian_coagulation_generator(
+        A, cstick, eps, ilf, irm, istick, m, phi, Rf, Rs, Sigma, SigmaFloor):
+    """Return coagulation Jacobian triplets, matching the Fortran generator.
+
+    Collision-table indices are already zero-based; -1 denotes an absent
+    sticking entry. Independent interior radii are evaluated in parallel.
+    Preserve the Fortran triplet order and its zero-filled trailing entries.
+    """
+    Nr, Nm = Sigma.shape
+    # Fortran MINLOC returns zero when the mask has no true entries.
+    first_fragment = -1
+    for i in range(Nm):
+        if irm[i, Nm-1] == -1:
+            if first_fragment == -1 or m[i] < m[first_fragment]:
+                first_fragment = i
+    p = Nm - (first_fragment + 1)
+    agrid = np.log10(m[0] / m[-1]) / (1.0 - Nm)
+    q = int(np.ceil(np.log10(2.0) / agrid))
+
+    size = (Nr-2)*Nm*Nm
+    dat = np.zeros(size, dtype=np.float64)
+    row = np.zeros(size, dtype=np.int32)
+    col = np.zeros(size, dtype=np.int32)
+    D = np.empty((Nm, Nm), dtype=np.float64)
+    for i in range(Nm):
+        for j in range(Nm):
+            D[j, i] = m[j] / m[i]
+    entries_per_radius = 0
+    for i in range(Nm):
+        entries_per_radius += Nm - max(i-q, 0)
+
+    for ir in prange(1, Nr-1):
+        jac = np.zeros((Nm, Nm), dtype=np.float64)
+        number = Sigma[ir] / m
+        imax = -1
+        for i in range(Nm):
+            if Sigma[ir, i] > SigmaFloor[ir, i]:
+                if imax == -1 or m[i] > m[imax]:
+                    imax = i
+
+        for i in range(imax+1):
+            for j in range(i+1):
+                if Rs[ir, j, i] > 0.0:
+                    rates = number[j] * Rs[ir, j, i]
+                    for l in range(4):
+                        k = istick[l, j, i]
+                        if k == -1:
+                            continue
+                        jac[k, i] += D[k, i] * cstick[l, j, i] * rates
+
+                if Rf[ir, j, i] > 0.0:
+                    ratef = number[j] * Rf[ir, j, i]
+                    for k in range(Nm):
+                        jac[k, i] += A[j, i] * phi[ilf[j, i], k] / m[i] * ratef
+                    if j <= i-p-1:
+                        k = irm[j, i]
+                        if k == i-1:
+                            jac[i-1, i] += D[i-1, i] * eps[j, i] * ratef
+                            jac[i, i] -= eps[j, i] * ratef
+                            jac[j, i] -= D[j, i] * ratef
+                        else:
+                            jac[k, i] += D[k, i] * eps[j, i] * ratef
+                            jac[k+1, i] += D[k+1, i] * (1.0-eps[j, i]) * ratef
+                            jac[i, i] -= ratef
+                            jac[j, i] -= D[j, i] * ratef
+                    else:
+                        jac[i, i] -= ratef
+                        jac[j, i] -= D[j, i] * ratef
+
+        offset = (ir-1)*entries_per_radius
+        for i in range(Nm):
+            for j in range(max(i-q, 0), Nm):
+                dat[offset] = jac[i, j]
+                row[offset] = ir*Nm + i
+                col[offset] = ir*Nm + j
+                offset += 1
+
+    return dat, row, col
+
+
 def jacobian(sim, x, dx=None, *args, **kwargs):
     """Function calculates the Jacobian for implicit dust integration.
 
@@ -349,8 +431,11 @@ def jacobian(sim, x, dx=None, *args, **kwargs):
     # Total problem size
     Ntot = int((Nr*Nm))
     # Getting data vector and coordinates in sparse matrix
-    dat, row, col = dust_f.jacobian_coagulation_generator(
-        A, cstick, eps, ilf, irm, istick, m, phi, Rf, Rs, SigD, SigDfloor)
+    dat, row, col = jacobian_coagulation_generator(
+        np.asarray(A), np.asarray(cstick), np.asarray(eps),
+        np.asarray(ilf), np.asarray(irm), np.asarray(istick),
+        np.asarray(m), np.asarray(phi), np.asarray(Rf), np.asarray(Rs),
+        np.asarray(SigD), np.asarray(SigDfloor))
     gen = (dat, (row, col))
     # Building sparse matrix of coagulation Jacobian
     J_coag = sp.csc_matrix(
