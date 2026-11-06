@@ -42,11 +42,19 @@ dust_source = custom_target('dust_fmodule.c',
   command: [py3, '-m', 'numpy.f2py', '--lower', '-m', 'dust_f', '@INPUT@', '--build-dir', 'dustpy/std']
   )
 
+# Keep OpenMP compile flags on Fortran sources, away from the C wrappers.
+dust_fortran_lib = static_library('dust_fortran',
+  dust_fortran_sources,
+  dependencies: omp_dep,
+  pic: true)
+
 py3.extension_module('dust_f',
-  dust_fortran_sources+dust_source,
+  dust_source,
   incdir_f2py / 'fortranobject.c',
   include_directories: inc_np,
-  dependencies: py_dep,
+  dependencies: [py_dep, omp_dep.partial_dependency(link_args: true, links: true)],
+  link_with: dust_fortran_lib,
+  link_language: 'fortran',
   install: true,
   subdir: 'dustpy/std')
 

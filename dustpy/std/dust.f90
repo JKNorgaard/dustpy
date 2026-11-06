@@ -1415,7 +1415,7 @@ subroutine vrel_ormel_cuzzi_2007(alpha, cs, mump, OmegaK, SigmaGas, &
   !
   ! Returns
   ! -------
-  ! vrel(Nr, Nm) : Relative velocities
+  ! vrel(Nr, Nm, Nm) : Relative velocities
 
   use constants, only: sigma_H2
 
@@ -1459,6 +1459,9 @@ subroutine vrel_ormel_cuzzi_2007(alpha, cs, mump, OmegaK, SigmaGas, &
   ya      =  1.6d0
   yap1inv =  1.d0/ (1.d0 + ya)
 
+  ! Keep one thread team across all stages; end-do barriers protect dependencies.
+  !$omp parallel default(shared) private(ir, i, j, Re, vn, dum)
+  !$omp do schedule(static)
   do ir=1, Nr
     OmKinv(ir)    = 1.d0 / OmegaK(ir)
     Re            = 0.5d0 * alpha(ir) * SigmaGas(ir) * sigma_H2 / mump(ir)
@@ -1468,7 +1471,9 @@ subroutine vrel_ormel_cuzzi_2007(alpha, cs, mump, OmegaK, SigmaGas, &
     ts(ir)        = OmKinv(ir) * ReInvSqrt(ir)
     vg2(ir)       = 1.5d0 * vn**2
   end do
+  !$omp end do
 
+  !$omp do schedule(static, 1)
   do i=1, Nm
     do j=1, i
       do ir=1, Nr
@@ -1494,7 +1499,9 @@ subroutine vrel_ormel_cuzzi_2007(alpha, cs, mump, OmegaK, SigmaGas, &
       end do
     end do
   end do
+  !$omp end do
 
+  !$omp do schedule(static, 1)
   do i=1, Nm
     do j=1, i
 
@@ -1537,7 +1544,9 @@ subroutine vrel_ormel_cuzzi_2007(alpha, cs, mump, OmegaK, SigmaGas, &
 
     end do
   end do
+  !$omp end do
 
+  !$omp do schedule(static, 1)
   do i=1, Nm
     do j=1, i
       do ir=1, Nr
@@ -1547,6 +1556,9 @@ subroutine vrel_ormel_cuzzi_2007(alpha, cs, mump, OmegaK, SigmaGas, &
       end do
     end do
   end do
+  !$omp end do
+
+  !$omp end parallel
 
 end subroutine vrel_ormel_cuzzi_2007
 
