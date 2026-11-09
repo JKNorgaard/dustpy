@@ -8,6 +8,7 @@ import scipy.sparse as sp
 import time
 
 from dustpy.std import ice_f, sim
+from dustpy.std._linear_solver import factorize
 from dustpy.utils.boundary import Boundary
 from simframe.frame import Group
 
@@ -441,7 +442,7 @@ def _get_ice_solver(sim):
 
         A = sp.identity(J_ice.shape[0], format="csc") - dt * J_ice
 
-        solver = sp.linalg.splu(A, permc_spec="MMD_AT_PLUS_A", diag_pivot_thresh=0.0, options=dict(SymmetricMode=True))
+        solver = factorize(A)
         
         sim.dust._ice_lu = solver
 

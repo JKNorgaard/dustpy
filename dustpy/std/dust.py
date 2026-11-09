@@ -2,6 +2,7 @@
 
 import dustpy.constants as c
 from dustpy.std import dust_f
+from dustpy.std._linear_solver import factorize
 
 import numpy as np
 from numba import njit, prange
@@ -1042,10 +1043,7 @@ def _f_impl_1_direct(x0, Y0, dx, jac=None, rhs=None, *args, **kwargs):
 
     A = eye - dx * jac
 
-    A_LU = sp.linalg.splu(A,
-                          permc_spec="MMD_AT_PLUS_A",
-                          diag_pivot_thresh=0.0,
-                          options=dict(SymmetricMode=True))
+    A_LU = factorize(A)
     Y1_ravel = A_LU.solve(rhs)
 
     Y1 = Y1_ravel.reshape(Y0.shape)

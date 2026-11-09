@@ -1,5 +1,6 @@
 python_sources = [
   '__init__.py',
+  '_linear_solver.py',
   'dust.py',
   'gas.py',
   'grid.py',
